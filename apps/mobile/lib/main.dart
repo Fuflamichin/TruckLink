@@ -1,19 +1,44 @@
-import 'dart:async';
-import 'dart:io';
-
 import 'package:design_system/design_system.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:network_protocol/network_protocol.dart';
 import 'package:telemetry_core/telemetry_core.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 
-void main() {
-  runApp(const ProviderScope(child: MobileApp()));
+import 'core/network/telemetry_connection.dart';
+
+// ============================================
+// APP INITIALIZATION
+// ============================================
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
+
+  runApp(const ProviderScope(child: TruckLinkApp()));
 }
 
-class MobileApp extends StatelessWidget {
-  const MobileApp({super.key});
+// ============================================
+// DEPENDENCY INJECTION
+// ============================================
+
+final telemetryConnectionProvider = Provider<TelemetryConnection>((ref) {
+  final connection = TelemetryConnection();
+
+  ref.onDispose(connection.dispose);
+
+  return connection;
+});
+
+// ============================================
+// APPLICATION
+// ============================================
+
+class TruckLinkApp extends StatelessWidget {
+  const TruckLinkApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -21,555 +46,495 @@ class MobileApp extends StatelessWidget {
       title: 'TruckLink',
       debugShowCheckedModeBanner: false,
       theme: TruckLinkTheme.dark,
-      home: const MobileHome(),
+      home: const MobileDashboard(),
     );
   }
 }
 
-enum ConnectionPhase { disconnected, connecting, waiting, live, stale, error }
+// ============================================
+// DASHBOARD
+// ============================================
 
-class MobileHome extends StatefulWidget {
-  const MobileHome({super.key});
-
-  @override
-  State<MobileHome> createState() => _MobileHomeState();
-}
-
-class _MobileHomeState extends State<MobileHome> {
-  static const int serverPort = 8787;
-
-  static const Duration connectionTimeout = Duration(seconds: 5);
-
-  static const Duration telemetryTimeout = Duration(seconds: 4);
-
-  final TextEditingController _hostController = TextEditingController();
-
-  WebSocketChannel? _channel;
-  StreamSubscription<dynamic>? _subscription;
-
-  Timer? _watchdog;
-
-  TruckSnapshot? _snapshot;
-
-  DateTime? _lastFrameReceivedAt;
-
-  ConnectionPhase _phase = ConnectionPhase.disconnected;
-
-  String _statusMessage = 'Нет подключения к ПК';
-
-  // ==========================================
-  // INITIALIZATION
-  // ==========================================
+class MobileDashboard extends ConsumerWidget {
+  const MobileDashboard({super.key});
 
   @override
-  void initState() {
-    super.initState();
-
-    _watchdog = Timer.periodic(
-      const Duration(seconds: 1),
-      (_) => _checkTelemetryFreshness(),
-    );
-  }
-
-  // ==========================================
-  // CONNECTION
-  // ==========================================
-
-  Future<void> _connect() async {
-    final host = _hostController.text.trim();
-
-    final address = InternetAddress.tryParse(host);
-
-    if (address == null || address.type != InternetAddressType.IPv4) {
-      if (!mounted) return;
-
-      setState(() {
-        _phase = ConnectionPhase.error;
-        _statusMessage = 'Введите правильный IPv4-адрес компьютера';
-      });
-
-      return;
-    }
-
-    await _closeConnection();
-
-    if (!mounted) return;
-
-    setState(() {
-      _phase = ConnectionPhase.connecting;
-      _statusMessage = 'Подключение к Windows Hub...';
-
-      _snapshot = null;
-      _lastFrameReceivedAt = null;
-    });
-
-    WebSocketChannel? channel;
-
-    try {
-      channel = WebSocketChannel.connect(
-        Uri(scheme: 'ws', host: host, port: serverPort),
-      );
-
-      _channel = channel;
-
-      await channel.ready.timeout(connectionTimeout);
-
-      if (!mounted || !identical(_channel, channel)) {
-        await channel.sink.close();
-        return;
-      }
-
-      _subscription = channel.stream.listen(
-        (message) {
-          _handleMessage(channel!, message);
-        },
-        onDone: () {
-          _handleConnectionLost(channel!, 'Соединение с компьютером закрыто');
-        },
-        onError: (Object error) {
-          _handleConnectionLost(channel!, 'Ошибка соединения: $error');
-        },
-        cancelOnError: true,
-      );
-
-      setState(() {
-        _phase = ConnectionPhase.waiting;
-        _statusMessage = 'Подключено к ПК. Ожидание телеметрии ETS2...';
-      });
-    } catch (error) {
-      await _closeConnection();
-
-      if (!mounted) return;
-
-      setState(() {
-        _phase = ConnectionPhase.error;
-        _statusMessage = 'Не удалось подключиться: $error';
-
-        _snapshot = null;
-      });
-    }
-  }
-
-  // ==========================================
-  // INCOMING TELEMETRY
-  // ==========================================
-
-  void _handleMessage(WebSocketChannel channel, dynamic message) {
-    if (!mounted || !identical(_channel, channel)) {
-      return;
-    }
-
-    try {
-      if (message is! String) {
-        throw const FormatException('Expected a JSON text message');
-      }
-
-      final snapshot = decodeSnapshot(message);
-
-      setState(() {
-        _snapshot = snapshot;
-        _lastFrameReceivedAt = DateTime.now();
-
-        _phase = ConnectionPhase.live;
-        _statusMessage = 'Телеметрия ETS2 активна';
-      });
-    } catch (error) {
-      setState(() {
-        _phase = ConnectionPhase.error;
-        _snapshot = null;
-
-        _statusMessage = 'Ошибка формата телеметрии: $error';
-      });
-    }
-  }
-
-  // ==========================================
-  // TELEMETRY WATCHDOG
-  // ==========================================
-
-  void _checkTelemetryFreshness() {
-    if (!mounted) return;
-
-    if (_phase != ConnectionPhase.live) {
-      return;
-    }
-
-    final lastUpdate = _lastFrameReceivedAt;
-
-    if (lastUpdate == null) {
-      return;
-    }
-
-    final elapsed = DateTime.now().difference(lastUpdate);
-
-    if (elapsed > telemetryTimeout) {
-      setState(() {
-        _phase = ConnectionPhase.stale;
-
-        // Never show old readings as live data.
-        _snapshot = null;
-
-        _statusMessage = 'Нет новых данных. Проверь ETS2 и соединение.';
-      });
-    }
-  }
-
-  // ==========================================
-  // CONNECTION LOST
-  // ==========================================
-
-  void _handleConnectionLost(WebSocketChannel channel, String message) {
-    if (!mounted || !identical(_channel, channel)) {
-      return;
-    }
-
-    _channel = null;
-    _subscription = null;
-    _lastFrameReceivedAt = null;
-
-    setState(() {
-      _phase = ConnectionPhase.error;
-      _statusMessage = message;
-      _snapshot = null;
-    });
-  }
-
-  // ==========================================
-  // DISCONNECT
-  // ==========================================
-
-  Future<void> _closeConnection() async {
-    final subscription = _subscription;
-    final channel = _channel;
-
-    _subscription = null;
-    _channel = null;
-    _lastFrameReceivedAt = null;
-
-    try {
-      await subscription?.cancel();
-    } catch (_) {
-      // Ignore already closed subscriptions.
-    }
-
-    try {
-      await channel?.sink.close();
-    } catch (_) {
-      // Ignore already closed sockets.
-    }
-  }
-
-  Future<void> _disconnect() async {
-    await _closeConnection();
-
-    if (!mounted) return;
-
-    setState(() {
-      _snapshot = null;
-      _phase = ConnectionPhase.disconnected;
-      _statusMessage = 'Отключено от Windows Hub';
-    });
-  }
-
-  // ==========================================
-  // UI HELPERS
-  // ==========================================
-
-  bool get _isConnected {
-    return _phase == ConnectionPhase.waiting ||
-        _phase == ConnectionPhase.live ||
-        _phase == ConnectionPhase.stale;
-  }
-
-  Color get _statusColor {
-    switch (_phase) {
-      case ConnectionPhase.live:
-        return Colors.tealAccent;
-
-      case ConnectionPhase.connecting:
-      case ConnectionPhase.waiting:
-        return Colors.lightBlueAccent;
-
-      case ConnectionPhase.disconnected:
-      case ConnectionPhase.stale:
-      case ConnectionPhase.error:
-        return Colors.orangeAccent;
-    }
-  }
-
-  IconData get _statusIcon {
-    switch (_phase) {
-      case ConnectionPhase.live:
-        return Icons.check_circle;
-
-      case ConnectionPhase.connecting:
-        return Icons.sync;
-
-      case ConnectionPhase.waiting:
-        return Icons.hourglass_top;
-
-      case ConnectionPhase.stale:
-        return Icons.warning_amber;
-
-      case ConnectionPhase.error:
-        return Icons.error_outline;
-
-      case ConnectionPhase.disconnected:
-        return Icons.wifi_off;
-    }
-  }
-
-  String _formatGear(int? gear) {
-    if (gear == null) return '—';
-    if (gear == 0) return 'N';
-    if (gear < 0) return 'R${gear.abs()}';
-
-    return gear.toString();
-  }
-
-  String _formatFuel(TruckSnapshot? snapshot) {
-    if (snapshot == null) return '—';
-
-    return '${(snapshot.fuelFraction * 100).toStringAsFixed(0)}%';
-  }
-
-  // ==========================================
-  // DISPOSE
-  // ==========================================
-
-  @override
-  void dispose() {
-    _watchdog?.cancel();
-
-    _subscription?.cancel();
-    _channel?.sink.close();
-
-    _hostController.dispose();
-
-    super.dispose();
-  }
-
-  // ==========================================
-  // INTERFACE
-  // ==========================================
-
-  @override
-  Widget build(BuildContext context) {
-    final snapshot = _snapshot;
+  Widget build(BuildContext context, WidgetRef ref) {
+    final connection = ref.watch(telemetryConnectionProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('TruckLink')),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
-        children: [
-          Text(
-            'Мой грузовик',
-            style: Theme.of(context).textTheme.headlineLarge,
-          ),
-
-          const SizedBox(height: 16),
-
+      appBar: AppBar(title: const Text('TruckLink'), centerTitle: false),
+      body: CustomScrollView(
+        key: const PageStorageKey('dashboard-scroll'),
+        physics: const ClampingScrollPhysics(),
+        slivers: [
           // ==================================
-          // CONNECTION STATUS
+          // HEADER AND CONNECTION
           // ==================================
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
+            sliver: SliverToBoxAdapter(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(_statusIcon, color: _statusColor),
-
-                  const SizedBox(width: 12),
-
-                  Expanded(
-                    child: Text(
-                      _statusMessage,
-                      style: TextStyle(color: _statusColor),
-                    ),
+                  Text(
+                    'Мой грузовик',
+                    style: Theme.of(context).textTheme.headlineMedium,
                   ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Мониторинг в реальном времени',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                  const SizedBox(height: 16),
+                  _ConnectionCard(connection: connection),
                 ],
               ),
             ),
           ),
 
-          const SizedBox(height: 16),
-
           // ==================================
-          // CONNECTION FORM
+          // TELEMETRY HEADER
           // ==================================
-          TextField(
-            controller: _hostController,
-            enabled: _phase != ConnectionPhase.connecting,
-            keyboardType: TextInputType.numberWithOptions(decimal: true),
-            decoration: const InputDecoration(
-              labelText: 'IP компьютера',
-              hintText: '192.168.1.20',
-              prefixIcon: Icon(Icons.computer),
-              border: OutlineInputBorder(),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(20, 24, 20, 12),
+            sliver: SliverToBoxAdapter(
+              child: Text(
+                'Приборная панель',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
             ),
           ),
 
-          const SizedBox(height: 12),
+          // ==================================
+          // OPTIMIZED TELEMETRY GRID
+          // ==================================
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            sliver: SliverLayoutBuilder(
+              builder: (context, constraints) {
+                final columns = constraints.crossAxisExtent < 270 ? 1 : 2;
 
-          FilledButton.icon(
-            onPressed: _phase == ConnectionPhase.connecting ? null : _connect,
-            icon: const Icon(Icons.wifi),
-            label: Text(
-              _isConnected ? 'Переподключиться' : 'Подключиться к Windows',
+                return SliverGrid(
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: columns,
+                    mainAxisExtent: 152,
+                    mainAxisSpacing: 8,
+                    crossAxisSpacing: 8,
+                  ),
+                  delegate: SliverChildBuilderDelegate((context, index) {
+                    return _MetricCard(connection: connection, index: index);
+                  }, childCount: 6),
+                );
+              },
             ),
           ),
-
-          if (_channel != null) ...[
-            const SizedBox(height: 8),
-
-            OutlinedButton.icon(
-              onPressed: _disconnect,
-              icon: const Icon(Icons.link_off),
-              label: const Text('Отключиться'),
-            ),
-          ],
-
-          const SizedBox(height: 12),
-
-          const Text(
-            'Локальное подключение через WebSocket. '
-            'Используйте только доверенную Wi-Fi сеть.',
-          ),
-
-          const SizedBox(height: 24),
-
-          // ==================================
-          // TRUCK DASHBOARD
-          // ==================================
-          Text(
-            'Приборная панель',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-
-          const SizedBox(height: 12),
-
-          GridView.count(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisCount: 2,
-
-            // Taller cards prevent bottom overflow
-            // on smaller smartphone displays.
-            childAspectRatio: 0.9,
-
-            children: [
-              MetricTile(
-                title: 'Скорость (км/ч)',
-                value: snapshot == null
-                    ? '—'
-                    : snapshot.speedKmh.abs().toStringAsFixed(1),
-                icon: Icons.speed,
-              ),
-
-              MetricTile(
-                title: 'Обороты (RPM)',
-                value: snapshot == null ? '—' : snapshot.rpm.toStringAsFixed(0),
-                icon: Icons.autorenew,
-              ),
-
-              MetricTile(
-                title: 'Передача',
-                value: _formatGear(snapshot?.gear),
-                icon: Icons.settings,
-              ),
-
-              MetricTile(
-                title: 'Топливо',
-                value: _formatFuel(snapshot),
-                icon: Icons.local_gas_station,
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 16),
 
           // ==================================
           // TRUCK INFORMATION
           // ==================================
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 24, 16, 0),
+            sliver: SliverToBoxAdapter(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
                     'Состояние грузовика',
-                    style: Theme.of(context).textTheme.titleMedium,
+                    style: Theme.of(context).textTheme.titleLarge,
                   ),
-
-                  const SizedBox(height: 16),
-
-                  _infoRow(
-                    'Двигатель',
-                    snapshot == null
-                        ? 'Нет данных'
-                        : snapshot.engineOn
-                        ? 'Включён'
-                        : 'Выключен',
-                  ),
-
-                  const Divider(),
-
-                  _infoRow(
-                    'Топливо',
-                    snapshot == null
-                        ? '—'
-                        : '${snapshot.fuelLiters.toStringAsFixed(1)} '
-                              '/ ${snapshot.fuelCapacityLiters.toStringAsFixed(1)} л',
-                  ),
-
-                  const Divider(),
-
-                  _infoRow(
-                    'Обновлено',
-                    snapshot == null
-                        ? '—'
-                        : _formatTime(snapshot.timestamp.toLocal()),
-                  ),
+                  const SizedBox(height: 12),
+                  _TruckStateCard(connection: connection),
                 ],
               ),
             ),
           ),
 
-          const SizedBox(height: 16),
-
           // ==================================
           // FUTURE MODULES
           // ==================================
-          const Card(
-            child: ListTile(
-              leading: Icon(Icons.route),
-              title: Text('Заказы / GPS / Финансы'),
-              subtitle: Text('Разделы появятся в следующих версиях.'),
+          const SliverPadding(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, 32),
+            sliver: SliverToBoxAdapter(
+              child: Card(
+                child: ListTile(
+                  leading: Icon(Icons.dashboard_customize),
+                  title: Text('TruckLink Dashboard'),
+                  subtitle: Text(
+                    'Навигация, GPS, заказы и финансы '
+                    'будут добавлены в следующих версиях.',
+                  ),
+                ),
+              ),
             ),
           ),
-
-          const SizedBox(height: 20),
         ],
       ),
     );
   }
+}
 
-  Widget _infoRow(String label, String value) {
-    return Row(
-      children: [
-        Expanded(child: Text(label)),
-        const SizedBox(width: 8),
-        Flexible(child: Text(value, textAlign: TextAlign.right)),
-      ],
-    );
+// ============================================
+// CONNECTION CARD
+// ============================================
+
+class _ConnectionCard extends StatefulWidget {
+  const _ConnectionCard({required this.connection});
+
+  final TelemetryConnection connection;
+
+  @override
+  State<_ConnectionCard> createState() => _ConnectionCardState();
+}
+
+class _ConnectionCardState extends State<_ConnectionCard> {
+  final TextEditingController _hostController = TextEditingController();
+
+  @override
+  void dispose() {
+    _hostController.dispose();
+    super.dispose();
   }
 
-  String _formatTime(DateTime time) {
-    String twoDigits(int number) => number.toString().padLeft(2, '0');
+  Color _statusColor(TelemetryConnectionStatus status) {
+    return switch (status) {
+      TelemetryConnectionStatus.connected => Colors.tealAccent,
+      TelemetryConnectionStatus.connecting ||
+      TelemetryConnectionStatus.waiting => Colors.lightBlueAccent,
+      _ => Colors.orangeAccent,
+    };
+  }
 
-    return '${twoDigits(time.hour)}:'
-        '${twoDigits(time.minute)}:'
-        '${twoDigits(time.second)}';
+  IconData _statusIcon(TelemetryConnectionStatus status) {
+    return switch (status) {
+      TelemetryConnectionStatus.connected => Icons.check_circle,
+      TelemetryConnectionStatus.connecting => Icons.sync,
+      TelemetryConnectionStatus.waiting => Icons.hourglass_top,
+      TelemetryConnectionStatus.stale => Icons.warning_amber,
+      TelemetryConnectionStatus.error => Icons.error_outline,
+      TelemetryConnectionStatus.disconnected => Icons.wifi_off,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Connection status only.
+            ListenableBuilder(
+              listenable: widget.connection,
+              builder: (context, child) {
+                final status = widget.connection.status;
+
+                return Row(
+                  children: [
+                    Icon(_statusIcon(status), color: _statusColor(status)),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        widget.connection.statusMessage,
+                        style: TextStyle(color: _statusColor(status)),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+
+            const SizedBox(height: 16),
+
+            TextField(
+              controller: _hostController,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: const InputDecoration(
+                labelText: 'IP компьютера',
+                hintText: '192.168.1.20',
+                prefixIcon: Icon(Icons.computer),
+                border: OutlineInputBorder(),
+              ),
+            ),
+
+            const SizedBox(height: 12),
+
+            // Connection actions are rebuilt
+            // independently of the text field.
+            ListenableBuilder(
+              listenable: widget.connection,
+              builder: (context, child) {
+                final isConnecting =
+                    widget.connection.status ==
+                    TelemetryConnectionStatus.connecting;
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    FilledButton.icon(
+                      onPressed: isConnecting
+                          ? null
+                          : () {
+                              widget.connection.connect(_hostController.text);
+                            },
+                      icon: const Icon(Icons.wifi),
+                      label: Text(
+                        widget.connection.isConnected
+                            ? 'Переподключиться'
+                            : 'Подключиться к Windows',
+                      ),
+                    ),
+                    if (widget.connection.isConnected) ...[
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          widget.connection.disconnect();
+                        },
+                        icon: const Icon(Icons.link_off),
+                        label: const Text('Отключиться'),
+                      ),
+                    ],
+                  ],
+                );
+              },
+            ),
+
+            const SizedBox(height: 10),
+
+            Text(
+              'Локальная сеть · WebSocket · порт 8787',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================
+// METRIC CONFIGURATION
+// ============================================
+
+const _metricTitles = <String>[
+  'Скорость',
+  'Обороты',
+  'Передача',
+  'Топливо',
+  'Температура',
+  'Износ двигателя',
+];
+
+const _metricUnits = <String>['км/ч', 'RPM', '', '%', '°C', '%'];
+
+const _metricIcons = <IconData>[
+  Icons.speed,
+  Icons.autorenew,
+  Icons.settings,
+  Icons.local_gas_station,
+  Icons.thermostat,
+  Icons.build_circle_outlined,
+];
+
+String _metricValue(int index, TruckSnapshot? snapshot) {
+  if (snapshot == null) return '—';
+
+  return switch (index) {
+    0 => snapshot.speedKmh.abs().toStringAsFixed(1),
+    1 => snapshot.rpm.toStringAsFixed(0),
+    2 => _formatGear(snapshot.gear),
+    3 => snapshot.fuelPercent.toStringAsFixed(0),
+    4 => snapshot.waterTemperatureC?.toStringAsFixed(0) ?? '—',
+    5 => snapshot.engineWearPercent?.toStringAsFixed(1) ?? '—',
+    _ => '—',
+  };
+}
+
+String _formatGear(int gear) {
+  if (gear == 0) return 'N';
+  if (gear < 0) return 'R${gear.abs()}';
+  return gear.toString();
+}
+
+// ============================================
+// OPTIMIZED METRIC CARD
+// ============================================
+
+class _MetricCard extends StatelessWidget {
+  const _MetricCard({required this.connection, required this.index});
+
+  final TelemetryConnection connection;
+  final int index;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: connection,
+      builder: (context, child) {
+        final snapshot = connection.snapshot;
+        final value = _metricValue(index, snapshot);
+
+        return RepaintBoundary(
+          child: Card(
+            margin: EdgeInsets.zero,
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    _metricIcons[index],
+                    size: 22,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    _metricTitles[index],
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelMedium,
+                  ),
+                  const Spacer(),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Expanded(
+                        child: FittedBox(
+                          alignment: Alignment.centerLeft,
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            value,
+                            maxLines: 1,
+                            style: Theme.of(context).textTheme.headlineSmall,
+                          ),
+                        ),
+                      ),
+                      if (_metricUnits[index].isNotEmpty) ...[
+                        const SizedBox(width: 5),
+                        Text(
+                          _metricUnits[index],
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ============================================
+// TRUCK STATE CARD
+// ============================================
+
+class _TruckStateCard extends StatelessWidget {
+  const _TruckStateCard({required this.connection});
+
+  final TelemetryConnection connection;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: connection,
+      builder: (context, child) {
+        final snapshot = connection.snapshot;
+
+        return RepaintBoundary(
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  _InfoRow(
+                    label: 'Двигатель',
+                    value: snapshot == null
+                        ? '—'
+                        : snapshot.engineOn
+                        ? 'Включён'
+                        : 'Выключен',
+                  ),
+                  const Divider(),
+                  _InfoRow(
+                    label: 'Пробег',
+                    value: snapshot?.odometerKm == null
+                        ? '—'
+                        : '${snapshot!.odometerKm!.toStringAsFixed(1)} км',
+                  ),
+                  const Divider(),
+                  _InfoRow(
+                    label: 'Топливо',
+                    value: snapshot == null
+                        ? '—'
+                        : '${snapshot.fuelLiters.toStringAsFixed(1)} / '
+                              '${snapshot.fuelCapacityLiters.toStringAsFixed(0)} л',
+                  ),
+                  const Divider(),
+                  _InfoRow(
+                    label: 'Круиз-контроль',
+                    value: snapshot?.cruiseControlKmh == null
+                        ? '—'
+                        : '${snapshot!.cruiseControlKmh!.toStringAsFixed(0)} км/ч',
+                  ),
+                  const Divider(),
+                  _InfoRow(
+                    label: 'Ограничение',
+                    value: snapshot?.speedLimitKmh == null
+                        ? '—'
+                        : '${snapshot!.speedLimitKmh!.toStringAsFixed(0)} км/ч',
+                  ),
+                  const Divider(),
+                  _InfoRow(
+                    label: 'Стояночный тормоз',
+                    value: snapshot?.parkBrake == null
+                        ? '—'
+                        : snapshot!.parkBrake!
+                        ? 'Активен'
+                        : 'Выключен',
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ============================================
+// REUSABLE INFORMATION ROW
+// ============================================
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(label, style: Theme.of(context).textTheme.bodyMedium),
+        ),
+        const SizedBox(width: 10),
+        Flexible(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+        ),
+      ],
+    );
   }
 }
