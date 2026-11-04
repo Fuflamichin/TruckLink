@@ -1,0 +1,67 @@
+
+# ==========================================
+# TruckLink - Git Ignore
+# ==========================================
+
+# Dart / Flutter
+.dart_tool/
+**/.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+**/.metadata
+
+# Build outputs
+build/
+**/build/
+*.log
+
+# Android
+**/android/.gradle/
+**/android/.cxx/
+**/android/local.properties
+**/android/key.properties
+*.jks
+*.keystore
+
+# iOS
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/ephemeral/
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/flutter_export_environment.sh
+
+# Windows
+**/windows/flutter/ephemeral/
+**/windows/flutter/generated_plugin_registrant.cc
+**/windows/flutter/generated_plugin_registrant.h
+**/windows/flutter/generated_plugins.cmake
+
+# IDE
+.idea/
+*.iml
+
+# VS Code
+# Сохраняем конфигурацию отладки,
+# но не личные настройки пользователя.
+/.vscode/*
+!/.vscode/launch.json
+
+# Operating system
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.p8
+*.mobileprovision

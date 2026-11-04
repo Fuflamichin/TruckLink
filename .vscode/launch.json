@@ -1,0 +1,34 @@
+
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "TruckLink Windows",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "cwd": "${workspaceFolder}/apps/desktop",
+      "deviceId": "windows",
+      "flutterMode": "debug"
+    },
+    {
+      "name": "TruckLink Android",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "cwd": "${workspaceFolder}/apps/mobile",
+      "deviceId": "cb8a949",
+      "flutterMode": "debug"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "TruckLink — Windows + Android",
+      "configurations": [
+        "TruckLink Windows",
+        "TruckLink Android"
+      ],
+      "stopAll": true
+    }
+  ]
+}

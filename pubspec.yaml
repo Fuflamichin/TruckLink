@@ -1,0 +1,21 @@
+name: trucklink_workspace
+publish_to: none
+environment:
+  sdk: ^3.9.0
+workspace:
+  - apps/desktop
+  - apps/mobile
+  - packages/telemetry_core
+  - packages/network_protocol
+  - packages/design_system
+  - services/relay_server
+dev_dependencies:
+  melos: ^8.10.0
+melos:
+  scripts:
+    analyze:
+      run: melos exec -- "flutter analyze"
+      description: Analyze Flutter apps and libraries (run from a Flutter SDK environment).
+    test:
+      run: melos exec --dir-exists=test -- "flutter test"
+      description: Run package tests.

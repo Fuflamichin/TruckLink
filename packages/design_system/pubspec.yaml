@@ -1,0 +1,9 @@
+name: design_system
+version: 0.1.0
+publish_to: none
+resolution: workspace
+environment:
+  sdk: ^3.9.0
+dependencies:
+  flutter:
+    sdk: flutter
