@@ -29,33 +29,40 @@ class _AppShellState extends State<AppShell> {
   static const String _morePageId = '__more__';
 
   late String _selectedId;
-
   String? _lastMoreSelection;
 
   @override
   void initState() {
     super.initState();
+    _selectedId = _defaultPageId();
+  }
 
-    _selectedId = widget.layout.bottomItems.isNotEmpty
-        ? widget.layout.bottomItems.first.id
-        : widget.layout.visibleItems.first.id;
+  String _defaultPageId() {
+    final pinned = widget.layout.bottomItems;
+
+    if (pinned.isNotEmpty) {
+      return pinned.first.id;
+    }
+
+    final visible = widget.layout.visibleItems;
+
+    if (visible.isNotEmpty) {
+      return visible.first.id;
+    }
+
+    return _morePageId;
   }
 
   @override
   void didUpdateWidget(covariant AppShell oldWidget) {
     super.didUpdateWidget(oldWidget);
 
-    final isMoreAvailable = widget.layout.moreItems.isNotEmpty;
+    final validSelection = _selectedId == _morePageId
+        ? widget.layout.moreItems.isNotEmpty
+        : widget.layout.visibleItems.any((item) => item.id == _selectedId);
 
-    final isSelectedVisible = widget.layout.visibleItems.any(
-      (item) => item.id == _selectedId,
-    );
-
-    if ((_selectedId == _morePageId && !isMoreAvailable) ||
-        (_selectedId != _morePageId && !isSelectedVisible)) {
-      _selectedId = widget.layout.bottomItems.isNotEmpty
-          ? widget.layout.bottomItems.first.id
-          : widget.layout.visibleItems.first.id;
+    if (!validSelection) {
+      _selectedId = _defaultPageId();
     }
   }
 
@@ -64,11 +71,15 @@ class _AppShellState extends State<AppShell> {
   // ==========================================
 
   void _selectItem(String id) {
-    if (_selectedId == id) return;
+    if (id == _selectedId) return;
 
-    final moreItem = widget.layout.moreItems.any((item) => item.id == id);
+    final exists = id == _morePageId
+        ? widget.layout.moreItems.isNotEmpty
+        : widget.layout.visibleItems.any((item) => item.id == id);
 
-    if (moreItem) {
+    if (!exists) return;
+
+    if (widget.layout.moreItems.any((item) => item.id == id)) {
       _lastMoreSelection = id;
     }
 
@@ -81,15 +92,9 @@ class _AppShellState extends State<AppShell> {
     _selectItem(_morePageId);
   }
 
-  // ==========================================
-  // SETTINGS
-  // ==========================================
-
   void _openSettings() {
     Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (context) => const _SettingsPreviewScreen(),
-      ),
+      MaterialPageRoute<void>(builder: (_) => const _SettingsPreviewScreen()),
     );
   }
 
@@ -105,11 +110,42 @@ class _AppShellState extends State<AppShell> {
     return _CombinedSectionsPage(item: item, connection: widget.connection);
   }
 
-  bool _isInstrumentsPage(NavigationItemConfig? item) {
-    if (item == null) return false;
+  // ==========================================
+  // SHARED APP BAR
+  // ==========================================
 
-    return item.sections.length == 1 &&
-        item.sections.first == TruckLinkSection.instruments;
+  PreferredSizeWidget _buildAppBar(
+    NavigationItemConfig? selectedItem,
+    bool isMorePage,
+  ) {
+    final isInstruments =
+        selectedItem != null &&
+        selectedItem.sections.length == 1 &&
+        selectedItem.sections.first == TruckLinkSection.instruments;
+
+    // MoreScreen and DashboardScreen currently
+    // display their own section title in the body.
+    // Use the app name to avoid duplicate titles.
+    //
+    // Later, when those headings are removed,
+    // the section title can be used here as well.
+    final title = isMorePage || isInstruments
+        ? 'TruckLink'
+        : selectedItem?.title ?? 'TruckLink';
+
+    return AppBar(
+      title: Text(title),
+      centerTitle: false,
+      automaticallyImplyLeading: false,
+      actions: [
+        IconButton(
+          tooltip: 'Настройки TruckLink',
+          onPressed: _openSettings,
+          icon: const Icon(Icons.settings_outlined),
+        ),
+        const SizedBox(width: 8),
+      ],
+    );
   }
 
   // ==========================================
@@ -118,7 +154,6 @@ class _AppShellState extends State<AppShell> {
 
   Widget _buildBottomNavigation() {
     final scheme = Theme.of(context).colorScheme;
-
     final pinnedItems = widget.layout.bottomItems;
     final moreItems = widget.layout.moreItems;
 
@@ -149,6 +184,7 @@ class _AppShellState extends State<AppShell> {
                       onTap: () => _selectItem(item.id),
                     ),
                   ),
+
                 if (moreItems.isNotEmpty)
                   Expanded(
                     child: _NavigationButton(
@@ -179,68 +215,29 @@ class _AppShellState extends State<AppShell> {
 
     final selectedItem = widget.layout.findById(_selectedId);
 
-    final isInstruments = _isInstrumentsPage(selectedItem);
-
     final pageIndex = isMorePage
         ? items.length
         : items.indexWhere((item) => item.id == _selectedId);
 
-    final pageTitle = isMorePage ? 'Ещё' : selectedItem?.title ?? 'TruckLink';
-
     return Scaffold(
-      // Shared header for most screens.
-      //
-      // The existing DashboardScreen still has
-      // its own AppBar. We will remove that in
-      // the next refactoring step.
-      appBar: isInstruments
-          ? null
-          : AppBar(
-              title: Text(pageTitle),
-              actions: [
-                IconButton(
-                  tooltip: 'Настройки',
-                  onPressed: _openSettings,
-                  icon: const Icon(Icons.settings_outlined),
-                ),
-                const SizedBox(width: 8),
-              ],
-            ),
+      // One AppBar for all application sections.
+      appBar: _buildAppBar(selectedItem, isMorePage),
 
-      body: Stack(
+      // IndexedStack preserves existing screens.
+      // The WebSocket connection is not recreated
+      // when switching tabs.
+      body: IndexedStack(
+        index: pageIndex < 0 ? 0 : pageIndex,
         children: [
-          // All pages preserve their state.
-          IndexedStack(
-            index: pageIndex < 0 ? 0 : pageIndex,
-            children: [
-              for (final item in items)
-                KeyedSubtree(key: ValueKey(item.id), child: _buildPage(item)),
+          for (final item in items)
+            KeyedSubtree(key: ValueKey(item.id), child: _buildPage(item)),
 
-              // Full-screen More page.
-              if (moreItems.isNotEmpty)
-                MoreScreen(
-                  key: const ValueKey(_morePageId),
-                  items: moreItems,
-                  selectedId: _lastMoreSelection,
-                  onSelect: _selectItem,
-                ),
-            ],
-          ),
-
-          // Temporary settings button for the
-          // DashboardScreen's existing AppBar.
-          if (isInstruments)
-            Positioned(
-              top: 0,
-              right: 8,
-              child: SafeArea(
-                bottom: false,
-                child: IconButton(
-                  tooltip: 'Настройки',
-                  onPressed: _openSettings,
-                  icon: const Icon(Icons.settings_outlined),
-                ),
-              ),
+          if (moreItems.isNotEmpty)
+            MoreScreen(
+              key: const ValueKey(_morePageId),
+              items: moreItems,
+              selectedId: _lastMoreSelection,
+              onSelect: _selectItem,
             ),
         ],
       ),
@@ -367,7 +364,7 @@ class _HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return CustomScrollView(
-      key: const PageStorageKey('trucklink-home'),
+      key: const PageStorageKey<String>('trucklink-home'),
       physics: const ClampingScrollPhysics(),
       slivers: [
         SliverPadding(
@@ -585,6 +582,7 @@ class _TruckScreenState extends State<_TruckScreen> {
     super.initState();
 
     _values = _buildValues(widget.connection.snapshot);
+
     widget.connection.addListener(_onUpdate);
   }
 
@@ -655,7 +653,7 @@ class _TruckScreenState extends State<_TruckScreen> {
     ];
 
     return ListView(
-      key: const PageStorageKey('truck-screen'),
+      key: const PageStorageKey<String>('truck-screen'),
       padding: const EdgeInsets.all(16),
       children: [
         Text(
@@ -671,6 +669,7 @@ class _TruckScreenState extends State<_TruckScreen> {
                 children: [
                   for (var index = 0; index < labels.length; index++) ...[
                     if (index != 0) const Divider(),
+
                     _DetailRow(label: labels[index], value: _values[index]),
                   ],
                 ],
@@ -760,7 +759,7 @@ class _JobScreenState extends State<_JobScreen> {
     }
 
     return ListView(
-      key: const PageStorageKey('job-screen'),
+      key: const PageStorageKey<String>('job-screen'),
       padding: const EdgeInsets.all(16),
       children: [
         Card(
@@ -965,8 +964,8 @@ class _SettingsPreviewScreen extends StatelessWidget {
               leading: Icon(Icons.wifi_outlined),
               title: Text('Подключение'),
               subtitle: Text(
-                'Отдельный стартовый экран '
-                'подключения будет добавлен позже.',
+                'Управление Windows Hub, выбор ПК '
+                'и переподключение появятся здесь.',
               ),
             ),
           ),
