@@ -12,10 +12,10 @@ import '../../app/navigation/navigation_layout_storage.dart';
 enum _NavigationArea { bottom, more, hidden }
 
 extension _NavigationAreaInfo on _NavigationArea {
-  String get destination => switch (this) {
-    _NavigationArea.bottom => 'нижнюю панель',
-    _NavigationArea.more => 'меню «Ещё»',
-    _NavigationArea.hidden => 'скрытые',
+  String get label => switch (this) {
+    _NavigationArea.bottom => 'Снизу',
+    _NavigationArea.more => 'Ещё',
+    _NavigationArea.hidden => 'Скрыто',
   };
 }
 
@@ -32,42 +32,27 @@ class NavigationSettingsScreen extends StatefulWidget {
 }
 
 class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
-  // ==========================================
-  // CONFIGURATION
-  // ==========================================
-
-  /// Maximum number of regular bottom tabs.
-  ///
-  /// The fifth position is reserved for "Ещё".
   static const int _maxBottomItems = 4;
-
-  // ==========================================
-  // STORAGE
-  // ==========================================
 
   final NavigationLayoutStorage _storage = NavigationLayoutStorage();
 
-  // ==========================================
-  // NAVIGATION CATALOG
-  // ==========================================
+  final List<String> _bottom = [];
+  final List<String> _more = [];
+  final List<String> _hidden = [];
+
+  final Map<String, SavedNavigationGroup> _groups = {};
 
   late final Map<String, NavigationItemConfig> _catalog;
 
   late final List<String> _defaultBottom;
   late final List<String> _defaultMore;
 
-  // ==========================================
-  // CURRENT NAVIGATION LAYOUT
-  // ==========================================
-
-  final List<String> _bottom = [];
-  final List<String> _more = [];
-  final List<String> _hidden = [];
-
   _NavigationArea _selectedArea = _NavigationArea.bottom;
 
   bool _loading = true;
   bool _saving = false;
+
+  int _nextGroupNumber = 0;
 
   // ==========================================
   // INITIALIZATION
@@ -77,48 +62,48 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
   void initState() {
     super.initState();
 
-    final layout = NavigationLayout.defaultLayout;
+    final defaults = NavigationLayout.defaultLayout;
 
-    // Build a catalog from the existing
-    // navigation configuration.
-    //
-    // This preserves existing section IDs
-    // and titles used by AppShell.
     _catalog = {
       for (final item in [
-        ...layout.visibleItems,
-        ...layout.bottomItems,
-        ...layout.moreItems,
+        ...defaults.visibleItems,
+        ...defaults.bottomItems,
+        ...defaults.moreItems,
       ])
         item.id: item,
     };
 
-    // Store default bottom tab order.
-    _defaultBottom = layout.bottomItems.map((item) => item.id).toSet().toList();
+    _defaultBottom = defaults.bottomItems
+        .map((item) => item.id)
+        .take(_maxBottomItems)
+        .toList();
 
-    // Find the remaining visible sections.
     final used = _defaultBottom.toSet();
 
     _defaultMore = [];
 
-    for (final item in [...layout.moreItems, ...layout.visibleItems]) {
+    for (final item in [
+      ...defaults.bottomItems,
+      ...defaults.moreItems,
+      ...defaults.visibleItems,
+    ]) {
       if (used.add(item.id)) {
         _defaultMore.add(item.id);
       }
     }
 
-    // Display default values immediately,
-    // then restore saved values from storage.
-    _restoreDefaultLists();
+    _restoreDefaults();
 
-    unawaited(_loadSavedLayout());
+    unawaited(_load());
   }
 
   // ==========================================
-  // RESTORE DEFAULT LISTS
+  // DEFAULT NAVIGATION
   // ==========================================
 
-  void _restoreDefaultLists() {
+  void _restoreDefaults() {
+    _groups.clear();
+
     _bottom
       ..clear()
       ..addAll(_defaultBottom);
@@ -128,37 +113,51 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
       ..addAll(_defaultMore);
 
     _hidden.clear();
+
+    _selectedArea = _NavigationArea.bottom;
   }
 
   // ==========================================
-  // LOAD SAVED NAVIGATION
+  // LOAD SAVED SETTINGS
   // ==========================================
 
-  Future<void> _loadSavedLayout() async {
+  Future<void> _load() async {
     try {
       final saved = await _storage.load();
 
       if (!mounted) return;
 
       if (saved != null) {
-        final known = _catalog.keys.toSet();
+        final groups = <String, SavedNavigationGroup>{};
 
-        // Prevent duplicates across all groups.
+        final occupiedMembers = <String>{};
+
+        final placedGroupIds = {...saved.bottomIds, ...saved.moreIds};
+
+        // Restore only groups with valid members.
+        for (final group in saved.groups) {
+          if (!placedGroupIds.contains(group.id) ||
+              _catalog.containsKey(group.id) ||
+              !group.memberIds.every(_catalog.containsKey) ||
+              group.memberIds.any(occupiedMembers.contains)) {
+            continue;
+          }
+
+          groups[group.id] = group;
+
+          occupiedMembers.addAll(group.memberIds);
+        }
+
         final used = <String>{};
 
-        List<String> filterIds(Iterable<String> ids) {
+        List<String> takeKnown(Iterable<String> input, {bool hidden = false}) {
           final result = <String>[];
 
-          for (final id in ids) {
-            // Ignore sections removed in a
-            // future or older app version.
-            if (!known.contains(id)) {
-              continue;
-            }
+          for (final id in input) {
+            final valid =
+                _catalog.containsKey(id) || (!hidden && groups.containsKey(id));
 
-            // One section can appear in
-            // only one navigation area.
-            if (!used.add(id)) {
+            if (!valid || occupiedMembers.contains(id) || !used.add(id)) {
               continue;
             }
 
@@ -168,46 +167,27 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
           return result;
         }
 
-        // ====================================
-        // RESTORE GROUPS
-        // ====================================
+        final bottom = takeKnown(saved.bottomIds);
 
-        final bottom = filterIds(saved.bottomIds);
+        final more = takeKnown(saved.moreIds);
 
-        final more = filterIds(saved.moreIds);
+        final hidden = takeKnown(saved.hiddenIds, hidden: true);
 
-        final hidden = filterIds(saved.hiddenIds);
+        // The fifth bottom position is for "Ещё".
+        if (bottom.length > _maxBottomItems) {
+          more.insertAll(0, bottom.sublist(_maxBottomItems));
 
-        // ====================================
-        // INCLUDE NEW SECTIONS
-        // ====================================
+          bottom.removeRange(_maxBottomItems, bottom.length);
+        }
 
-        // If a future TruckLink version adds
-        // new sections, place them in "Ещё".
+        // Put new application sections into "Ещё".
         for (final id in _catalog.keys) {
-          if (used.add(id)) {
+          if (!occupiedMembers.contains(id) && used.add(id)) {
             more.add(id);
           }
         }
 
-        // ====================================
-        // ENFORCE BOTTOM TAB LIMIT
-        // ====================================
-
-        if (bottom.length > _maxBottomItems) {
-          final overflow = bottom.sublist(_maxBottomItems);
-
-          bottom.removeRange(_maxBottomItems, bottom.length);
-
-          more.insertAll(0, overflow);
-        }
-
-        // ====================================
-        // KEEP ONE BOTTOM TAB
-        // ====================================
-
-        // Always keep at least one regular
-        // section in the bottom navigation.
+        // Keep at least one bottom tab.
         if (bottom.isEmpty) {
           if (more.isNotEmpty) {
             bottom.add(more.removeAt(0));
@@ -216,11 +196,11 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
           }
         }
 
-        // ====================================
-        // APPLY RESTORED LAYOUT
-        // ====================================
-
         setState(() {
+          _groups
+            ..clear()
+            ..addAll(groups);
+
           _bottom
             ..clear()
             ..addAll(bottom);
@@ -238,7 +218,7 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
       debugPrint('TruckLink: navigation load failed: $error');
 
       if (mounted) {
-        _showMessage('Не удалось загрузить настройки навигации.');
+        _message('Не удалось загрузить настройки навигации');
       }
     } finally {
       if (mounted) {
@@ -250,10 +230,10 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
   }
 
   // ==========================================
-  // GET ACTIVE GROUP
+  // GROUP ACCESS
   // ==========================================
 
-  List<String> _listFor(_NavigationArea area) {
+  List<String> _items(_NavigationArea area) {
     return switch (area) {
       _NavigationArea.bottom => _bottom,
       _NavigationArea.more => _more,
@@ -261,217 +241,53 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
     };
   }
 
-  // ==========================================
-  // REORDER SECTIONS
-  // ==========================================
-
-  /// Called by ReorderableListView.onReorder.
-  ///
-  /// Flutter passes an insertion index.
-  /// When moving an item down, its removal
-  /// shifts subsequent positions by one.
-  ///
-  /// We must adjust newIndex accordingly.
-  void _reorder(int oldIndex, int newIndex) {
-    if (_saving || _loading) return;
-
-    final items = _listFor(_selectedArea);
-
-    // ========================================
-    // VALIDATE INDEXES
-    // ========================================
-
-    if (oldIndex < 0 || oldIndex >= items.length) {
-      return;
-    }
-
-    if (newIndex < 0 || newIndex > items.length) {
-      return;
-    }
-
-    // ========================================
-    // CORRECT INDEX WHEN MOVING DOWN
-    // ========================================
-
-    if (newIndex > oldIndex) {
-      newIndex--;
-    }
-
-    if (oldIndex == newIndex) {
-      return;
-    }
-
-    // ========================================
-    // APPLY NEW ORDER
-    // ========================================
-
-    setState(() {
-      final item = items.removeAt(oldIndex);
-
-      items.insert(newIndex, item);
-    });
-  }
-
-  // ==========================================
-  // MOVE BETWEEN GROUPS
-  // ==========================================
-
-  void _moveItem(String id, _NavigationArea destination) {
-    if (_saving || _loading) return;
-
-    final source = _selectedArea;
-
-    if (source == destination) {
-      return;
-    }
-
-    // ========================================
-    // REQUIRE ONE BOTTOM TAB
-    // ========================================
-
-    if (source == _NavigationArea.bottom && _bottom.length == 1) {
-      _showMessage(
-        'Нужно оставить хотя бы одну '
-        'вкладку в нижней панели.',
-      );
-
-      return;
-    }
-
-    // ========================================
-    // ENFORCE BOTTOM TAB LIMIT
-    // ========================================
-
-    if (destination == _NavigationArea.bottom &&
-        _bottom.length >= _maxBottomItems) {
-      _showMessage(
-        'В нижней панели может быть '
-        'не более четырёх вкладок.',
-      );
-
-      return;
-    }
-
-    // ========================================
-    // APPLY MOVE
-    // ========================================
-
-    setState(() {
-      // Remove from any current group.
-      _bottom.remove(id);
-      _more.remove(id);
-      _hidden.remove(id);
-
-      // Add to the destination group.
-      _listFor(destination).add(id);
-
-      // Show the destination group.
-      _selectedArea = destination;
-    });
-  }
-
-  // ==========================================
-  // SAVE NAVIGATION
-  // ==========================================
-
-  Future<void> _save() async {
-    if (_saving || _loading) return;
-
-    setState(() {
-      _saving = true;
-    });
-
-    final layout = SavedNavigationLayout(
-      bottomIds: _bottom,
-      moreIds: _more,
-      hiddenIds: _hidden,
-    );
-
-    try {
-      await _storage.save(layout);
-
-      if (!mounted) return;
-
-      // Return success to SettingsScreen.
-      Navigator.of(context).pop(true);
-    } catch (error) {
-      debugPrint('TruckLink: navigation save failed: $error');
-
-      if (mounted) {
-        _showMessage('Не удалось сохранить настройки навигации.');
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _saving = false;
-        });
+  _NavigationArea? _areaOf(String id) {
+    for (final area in _NavigationArea.values) {
+      if (_items(area).contains(id)) {
+        return area;
       }
     }
+
+    return null;
   }
 
   // ==========================================
-  // RESET TO DEFAULTS
+  // SECTION INFORMATION
   // ==========================================
 
-  Future<void> _reset() async {
-    if (_saving || _loading) return;
+  String _title(String id) {
+    return _groups[id]?.title ?? _catalog[id]?.title ?? id;
+  }
 
-    setState(() {
-      _saving = true;
-    });
+  String _subtitle(String id) {
+    final group = _groups[id];
 
-    try {
-      // Remove stored custom navigation.
-      await _storage.reset();
-
-      if (!mounted) return;
-
-      setState(() {
-        _restoreDefaultLists();
-
-        _selectedArea = _NavigationArea.bottom;
-      });
-
-      _showMessage('Стандартная конфигурация восстановлена.');
-    } catch (error) {
-      debugPrint('TruckLink: navigation reset failed: $error');
-
-      if (mounted) {
-        _showMessage('Не удалось сбросить настройки.');
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _saving = false;
-        });
-      }
+    if (group != null) {
+      return group.memberIds.map(_title).join(' · ');
     }
+
+    final item = _catalog[id];
+
+    if (item == null || item.sections.length == 1) {
+      return 'Раздел TruckLink';
+    }
+
+    return item.sections.map((section) => section.title).join(' · ');
   }
 
-  // ==========================================
-  // SHOW MESSAGE
-  // ==========================================
-
-  void _showMessage(String message) {
-    if (!mounted) return;
-
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
-    );
-  }
-
-  // ==========================================
-  // SECTION ICON
-  // ==========================================
-
-  IconData _iconFor(NavigationItemConfig item) {
-    // Multiple sections may share a tab.
-    if (item.sections.length != 1) {
+  IconData _icon(String id) {
+    if (_groups.containsKey(id)) {
       return Icons.layers_outlined;
     }
 
+    final item = _catalog[id];
+
+    if (item == null || item.sections.length != 1) {
+      return Icons.widgets_outlined;
+    }
+
     return switch (item.sections.first) {
-      TruckLinkSection.home => Icons.dashboard_outlined,
+      TruckLinkSection.home => Icons.home_outlined,
 
       TruckLinkSection.instruments => Icons.speed_outlined,
 
@@ -488,62 +304,443 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
   }
 
   // ==========================================
-  // SECTION SUBTITLE
+  // REORDER ITEMS
   // ==========================================
 
-  String _subtitleFor(NavigationItemConfig item) {
-    if (item.sections.length <= 1) {
-      return 'Раздел TruckLink';
+  void _reorder(int oldIndex, int newIndex) {
+    if (_loading || _saving) return;
+
+    final items = _items(_selectedArea);
+
+    if (oldIndex < 0 ||
+        oldIndex >= items.length ||
+        newIndex < 0 ||
+        newIndex > items.length) {
+      return;
     }
 
-    return item.sections.map((section) => section.title).join(' · ');
+    // Flutter's onReorder provides insertion
+    // position before the removal adjustment.
+    if (newIndex > oldIndex) {
+      newIndex--;
+    }
+
+    if (newIndex == oldIndex) return;
+
+    setState(() {
+      final id = items.removeAt(oldIndex);
+
+      items.insert(newIndex, id);
+    });
   }
 
   // ==========================================
-  // SECTION ROW
+  // MOVE BETWEEN AREAS
   // ==========================================
 
-  Widget _buildItem(String id, int index) {
-    final item = _catalog[id]!;
+  void _move(String id, _NavigationArea destination) {
+    if (_loading || _saving) return;
 
+    // Combined groups cannot be hidden directly.
+    // First split them into regular sections.
+    if (_groups.containsKey(id) && destination == _NavigationArea.hidden) {
+      _message('Сначала раздели объединённую вкладку');
+
+      return;
+    }
+
+    final from = _areaOf(id);
+
+    if (from == null || from == destination) {
+      return;
+    }
+
+    // Always keep one bottom tab.
+    if (from == _NavigationArea.bottom && _bottom.length == 1) {
+      _message(
+        'В нижней панели должна остаться '
+        'хотя бы одна вкладка',
+      );
+
+      return;
+    }
+
+    // Maximum: four custom tabs + More.
+    if (destination == _NavigationArea.bottom &&
+        _bottom.length >= _maxBottomItems) {
+      _message(
+        'Внизу может быть не более '
+        'четырёх вкладок',
+      );
+
+      return;
+    }
+
+    setState(() {
+      _items(from).remove(id);
+
+      _items(destination).add(id);
+
+      _selectedArea = destination;
+    });
+  }
+
+  // ==========================================
+  // MERGE AVAILABILITY
+  // ==========================================
+
+  bool _canMerge(String id) {
+    if (_groups.containsKey(id) || _selectedArea == _NavigationArea.hidden) {
+      return false;
+    }
+
+    final original = _catalog[id];
+
+    return original != null && original.sections.length == 1;
+  }
+
+  List<String> _mergeCandidates(String sourceId) {
+    return [..._bottom, ..._more].where((id) {
+      if (id == sourceId || _groups.containsKey(id)) {
+        return false;
+      }
+
+      return _catalog[id]?.sections.length == 1;
+    }).toList();
+  }
+
+  // ==========================================
+  // MERGE TWO SECTIONS
+  // ==========================================
+
+  Future<void> _merge(String sourceId) async {
+    if (_loading || _saving || !_canMerge(sourceId)) {
+      return;
+    }
+
+    final candidates = _mergeCandidates(sourceId);
+
+    if (candidates.isEmpty) {
+      _message('Нет другого раздела для объединения');
+
+      return;
+    }
+
+    String groupTitle = '${_title(sourceId)} + ${_title(candidates.first)}';
+
+    String secondId = candidates.first;
+
+    bool emptyName = false;
+
+    final choice = await showDialog<_MergeChoice>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, refresh) {
+            return AlertDialog(
+              title: const Text('Объединить разделы'),
+
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Первый: ${_title(sourceId)}'),
+
+                    const SizedBox(height: 16),
+
+                    DropdownButtonFormField<String>(
+                      initialValue: secondId,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Второй раздел',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: [
+                        for (final id in candidates)
+                          DropdownMenuItem<String>(
+                            value: id,
+                            child: Text(_title(id)),
+                          ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          refresh(() {
+                            secondId = value;
+                          });
+                        }
+                      },
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    TextFormField(
+                      initialValue: groupTitle,
+                      maxLength: 30,
+                      decoration: InputDecoration(
+                        labelText: 'Название новой вкладки',
+                        border: const OutlineInputBorder(),
+                        errorText: emptyName ? 'Введи название' : null,
+                      ),
+                      onChanged: (value) {
+                        groupTitle = value;
+
+                        if (emptyName) {
+                          refresh(() {
+                            emptyName = false;
+                          });
+                        }
+                      },
+                    ),
+
+                    const Text('Внутри вкладки будут две страницы.'),
+                  ],
+                ),
+              ),
+
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(dialogContext);
+                  },
+                  child: const Text('Отмена'),
+                ),
+
+                FilledButton(
+                  onPressed: () {
+                    final title = groupTitle.trim();
+
+                    if (title.isEmpty) {
+                      refresh(() {
+                        emptyName = true;
+                      });
+
+                      return;
+                    }
+
+                    Navigator.pop(dialogContext, _MergeChoice(secondId, title));
+                  },
+                  child: const Text('Объединить'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (!mounted || choice == null) {
+      return;
+    }
+
+    final partnerId = choice.secondId;
+
+    final sourceArea = _areaOf(sourceId);
+    final partnerArea = _areaOf(partnerId);
+
+    if (sourceArea == null || partnerArea == null) {
+      return;
+    }
+
+    // When either section is pinned,
+    // the combined tab will also be pinned.
+    final destination =
+        sourceArea == _NavigationArea.bottom ||
+            partnerArea == _NavigationArea.bottom
+        ? _NavigationArea.bottom
+        : _NavigationArea.more;
+
+    final target = _items(destination);
+
+    final sourcePos = target.indexOf(sourceId);
+    final partnerPos = target.indexOf(partnerId);
+
+    final index = sourcePos >= 0 ? sourcePos : partnerPos;
+
+    final id =
+        'group:${DateTime.now().microsecondsSinceEpoch}'
+        '-${_nextGroupNumber++}';
+
+    final group = SavedNavigationGroup(
+      id: id,
+      title: choice.title,
+      memberIds: [sourceId, partnerId],
+    );
+
+    setState(() {
+      _items(sourceArea).remove(sourceId);
+      _items(partnerArea).remove(partnerId);
+
+      _groups[id] = group;
+
+      final insertion = index.clamp(0, target.length).toInt();
+
+      target.insert(insertion, id);
+
+      _selectedArea = destination;
+    });
+  }
+
+  // ==========================================
+  // SPLIT COMBINED TAB
+  // ==========================================
+
+  void _split(String id) {
+    final group = _groups[id];
+    final area = _areaOf(id);
+
+    if (_loading || _saving || group == null || area == null) {
+      return;
+    }
+
+    final list = _items(area);
+    final index = list.indexOf(id);
+
+    if (index < 0) return;
+
+    setState(() {
+      list.removeAt(index);
+
+      _groups.remove(id);
+
+      if (area == _NavigationArea.bottom) {
+        final freeSlots = _maxBottomItems - _bottom.length;
+
+        final pinned = group.memberIds.take(freeSlots).toList();
+
+        final overflow = group.memberIds.skip(freeSlots).toList();
+
+        _bottom.insertAll(index, pinned);
+
+        _more.insertAll(0, overflow);
+      } else {
+        list.insertAll(index, group.memberIds);
+      }
+    });
+
+    _message('Разделы снова доступны отдельно');
+  }
+
+  // ==========================================
+  // SAVE SETTINGS
+  // ==========================================
+
+  Future<void> _save() async {
+    if (_loading || _saving) return;
+
+    setState(() {
+      _saving = true;
+    });
+
+    try {
+      final layout = SavedNavigationLayout(
+        bottomIds: _bottom,
+        moreIds: _more,
+        hiddenIds: _hidden,
+        groups: _groups.values,
+      );
+
+      await _storage.save(layout);
+
+      if (mounted) {
+        Navigator.of(context).pop(true);
+      }
+    } catch (error) {
+      debugPrint('TruckLink: navigation save failed: $error');
+
+      if (mounted) {
+        _message('Не удалось сохранить навигацию');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+        });
+      }
+    }
+  }
+
+  // ==========================================
+  // RESET TO DEFAULT
+  // ==========================================
+
+  Future<void> _reset() async {
+    if (_loading || _saving) return;
+
+    setState(() {
+      _saving = true;
+    });
+
+    try {
+      await _storage.reset();
+
+      if (mounted) {
+        Navigator.of(context).pop(true);
+      }
+    } catch (error) {
+      debugPrint('TruckLink: navigation reset failed: $error');
+
+      if (mounted) {
+        _message('Не удалось сбросить настройки');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+        });
+      }
+    }
+  }
+
+  // ==========================================
+  // SNACKBAR
+  // ==========================================
+
+  void _message(String text) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  // ==========================================
+  // BUILD NAVIGATION ROW
+  // ==========================================
+
+  Widget _buildRow(String id, int index) {
     final scheme = Theme.of(context).colorScheme;
     final theme = Theme.of(context);
 
+    final isGroup = _groups.containsKey(id);
+    final area = _selectedArea;
+
     return Card(
-      key: ValueKey('${_selectedArea.name}-$id'),
+      key: ValueKey('$area:$id'),
       margin: const EdgeInsets.only(bottom: 8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 8),
-        child: Row(
-          children: [
-            // =================================
-            // SECTION ICON
-            // =================================
-            Padding(
-              padding: const EdgeInsets.all(10),
-              child: Icon(_iconFor(item), color: scheme.primary),
-            ),
+      child: Row(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: Icon(_icon(id), color: scheme.primary),
+          ),
 
-            const SizedBox(width: 4),
-
-            // =================================
-            // SECTION INFORMATION
-            // =================================
-            Expanded(
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    item.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                    _title(id),
                     style: theme.textTheme.titleMedium,
+                    overflow: TextOverflow.ellipsis,
                   ),
 
                   const SizedBox(height: 4),
 
                   Text(
-                    _subtitleFor(item),
+                    _subtitle(id),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.bodySmall,
@@ -551,58 +748,68 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
                 ],
               ),
             ),
+          ),
 
-            // =================================
-            // MOVE MENU
-            // =================================
-            PopupMenuButton<_NavigationArea>(
-              tooltip: 'Переместить раздел',
-              enabled: !_saving,
+          PopupMenuButton<String>(
+            tooltip: 'Действия с разделом',
+            enabled: !_saving,
+            icon: const Icon(Icons.more_vert_rounded),
+            onSelected: (value) {
+              if (value == 'merge') {
+                unawaited(_merge(id));
+              } else if (value == 'split') {
+                _split(id);
+              } else if (value.startsWith('move:')) {
+                final destination = _NavigationArea.values.firstWhere((area) {
+                  return area.name == value.substring(5);
+                });
 
-              icon: const Icon(Icons.more_vert_rounded),
+                _move(id, destination);
+              }
+            },
+            itemBuilder: (context) {
+              return [
+                if (_canMerge(id) && _mergeCandidates(id).isNotEmpty)
+                  const PopupMenuItem<String>(
+                    value: 'merge',
+                    child: Text('Объединить с другим'),
+                  ),
 
-              onSelected: (destination) {
-                _moveItem(id, destination);
-              },
+                if (isGroup)
+                  const PopupMenuItem<String>(
+                    value: 'split',
+                    child: Text('Разделить вкладку'),
+                  ),
 
-              itemBuilder: (context) {
-                return [
-                  for (final area in _NavigationArea.values)
-                    if (area != _selectedArea)
-                      PopupMenuItem<_NavigationArea>(
-                        value: area,
-                        child: Text(
-                          'Переместить в '
-                          '${area.destination}',
-                        ),
+                for (final destination in _NavigationArea.values)
+                  if (destination != area &&
+                      !(isGroup && destination == _NavigationArea.hidden))
+                    PopupMenuItem<String>(
+                      value: 'move:${destination.name}',
+                      child: Text(
+                        'Переместить: '
+                        '${destination.label}',
                       ),
-                ];
-              },
+                    ),
+              ];
+            },
+          ),
+
+          ReorderableDragStartListener(
+            index: index,
+            enabled: !_saving,
+            child: const Padding(
+              padding: EdgeInsets.all(12),
+              child: Icon(Icons.drag_handle_rounded),
             ),
-
-            // =================================
-            // REORDER HANDLE
-            // =================================
-
-            // Dragging starts immediately from
-            // this handle.
-            ReorderableDragStartListener(
-              index: index,
-              enabled: !_saving,
-
-              child: const Padding(
-                padding: EdgeInsets.all(10),
-                child: Icon(Icons.drag_handle_rounded),
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
   // ==========================================
-  // BUILD
+  // BUILD SCREEN
   // ==========================================
 
   @override
@@ -610,104 +817,78 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
 
-    // ========================================
-    // LOADING
-    // ========================================
-
     if (_loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    final ids = _listFor(_selectedArea);
+    final ids = _items(_selectedArea);
 
     return Scaffold(
-      // ======================================
-      // APP BAR
-      // ======================================
       appBar: AppBar(
         title: const Text('Навигация'),
-
         actions: [
           TextButton(
             onPressed: _saving ? null : _reset,
             child: const Text('Сбросить'),
           ),
-
-          const SizedBox(width: 8),
         ],
       ),
 
-      // ======================================
-      // BODY
-      // ======================================
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // ================================
-              // HEADER
-              // ================================
               Text('Расположение разделов', style: theme.textTheme.titleLarge),
 
               const SizedBox(height: 8),
 
               Text(
                 'Перетаскивай разделы за значок '
-                'справа. Через меню с тремя точками '
-                'можно переместить раздел '
-                'в другую группу.',
+                'справа. Через меню ⋮ можно '
+                'перемещать, объединять '
+                'и разделять вкладки.',
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: scheme.onSurfaceVariant,
                 ),
               ),
 
-              const SizedBox(height: 20),
+              const SizedBox(height: 18),
 
-              // ================================
-              // GROUP SELECTOR
-              // ================================
               SegmentedButton<_NavigationArea>(
                 showSelectedIcon: false,
-
                 segments: const [
                   ButtonSegment(
                     value: _NavigationArea.bottom,
                     label: Text('Снизу'),
                   ),
-
                   ButtonSegment(
                     value: _NavigationArea.more,
                     label: Text('Ещё'),
                   ),
-
                   ButtonSegment(
                     value: _NavigationArea.hidden,
                     label: Text('Скрыто'),
                   ),
                 ],
-
                 selected: {_selectedArea},
-
                 onSelectionChanged: _saving
                     ? null
-                    : (selected) {
+                    : (selection) {
                         setState(() {
-                          _selectedArea = selected.first;
+                          _selectedArea = selection.first;
                         });
                       },
               ),
 
               const SizedBox(height: 14),
 
-              // ================================
-              // SECTION COUNTERS
-              // ================================
               Text(
-                'Снизу: ${_bottom.length}  ·  '
-                'Ещё: ${_more.length}  ·  '
-                'Скрыто: ${_hidden.length}',
+                'Снизу: ${_bottom.length} · '
+                'Ещё: ${_more.length} · '
+                'Скрыто: ${_hidden.length} · '
+                'Группы: ${_groups.length}',
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: scheme.primary,
                   fontWeight: FontWeight.w600,
@@ -716,80 +897,33 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
 
               const SizedBox(height: 12),
 
-              // ================================
-              // REORDERABLE LIST
-              // ================================
               Expanded(
                 child: ids.isEmpty
-                    ? Center(
-                        child: Text(
-                          'В этой группе пока '
-                          'нет разделов.',
-                          textAlign: TextAlign.center,
-                          style: theme.textTheme.bodyMedium,
-                        ),
-                      )
+                    ? const Center(child: Text('В этой группе нет разделов.'))
                     : ReorderableListView.builder(
-                        // Recreate list when
-                        // switching navigation areas.
                         key: ValueKey(_selectedArea),
-
                         buildDefaultDragHandles: false,
-
                         itemCount: ids.length,
-
-                        // Flutter 3.41.4:
-                        //
-                        // The correct callback
-                        // is onReorder.
-                        //
-                        // Our _reorder method
-                        // adjusts newIndex when
-                        // moving items downward.
                         onReorder: _reorder,
-
                         itemBuilder: (context, index) {
-                          return _buildItem(ids[index], index);
+                          return _buildRow(ids[index], index);
                         },
                       ),
               ),
 
-              // ================================
-              // INFORMATION
-              // ================================
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 10),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      Icons.info_outline_rounded,
-                      color: scheme.primary,
-                      size: 20,
-                    ),
-
-                    const SizedBox(width: 10),
-
-                    const Expanded(
-                      child: Text(
-                        'Изменения сохраняются на телефоне '
-                        'и применяются после сохранения. '
-                        'Скрытые разделы можно восстановить '
-                        'здесь в любой момент.',
-                      ),
-                    ),
-                  ],
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 10),
+                child: Text(
+                  'Объединённая вкладка занимает '
+                  'одно место внизу. Если при '
+                  'разделении не хватает места, '
+                  'лишние разделы переходят '
+                  'в «Ещё».',
                 ),
               ),
 
-              const SizedBox(height: 8),
-
-              // ================================
-              // SAVE BUTTON
-              // ================================
               FilledButton.icon(
                 onPressed: _saving ? null : _save,
-
                 icon: _saving
                     ? const SizedBox(
                         width: 20,
@@ -797,11 +931,9 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.check_rounded),
-
                 label: Text(
                   _saving ? 'Сохранение...' : 'Сохранить расположение',
                 ),
-
                 style: FilledButton.styleFrom(
                   minimumSize: const Size.fromHeight(52),
                 ),
@@ -812,4 +944,15 @@ class _NavigationSettingsScreenState extends State<NavigationSettingsScreen> {
       ),
     );
   }
+}
+
+// ============================================
+// MERGE DIALOG RESULT
+// ============================================
+
+class _MergeChoice {
+  const _MergeChoice(this.secondId, this.title);
+
+  final String secondId;
+  final String title;
 }

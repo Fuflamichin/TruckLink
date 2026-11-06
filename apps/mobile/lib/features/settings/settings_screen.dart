@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/network/telemetry_connection.dart';
+import 'appearance_settings_screen.dart';
 import 'connection_settings_screen.dart';
 import 'navigation_settings_screen.dart';
 
@@ -17,10 +18,8 @@ class SettingsScreen extends StatelessWidget {
 
   final TelemetryConnection connection;
 
-  /// Called when the navigation editor saves.
-  ///
-  /// AppShell uses this to reload navigation
-  /// without recreating TelemetryConnection.
+  // Called by AppShell after navigation
+  // settings have been saved.
   final VoidCallback? onNavigationChanged;
 
   // ==========================================
@@ -28,10 +27,20 @@ class SettingsScreen extends StatelessWidget {
   // ==========================================
 
   void _openConnectionSettings(BuildContext context) {
-    Navigator.of(context).push(
+    Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => ConnectionSettingsScreen(connection: connection),
       ),
+    );
+  }
+
+  // ==========================================
+  // APPEARANCE SETTINGS
+  // ==========================================
+
+  void _openAppearanceSettings(BuildContext context) {
+    Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(builder: (_) => const AppearanceSettingsScreen()),
     );
   }
 
@@ -44,12 +53,9 @@ class SettingsScreen extends StatelessWidget {
       MaterialPageRoute<bool>(builder: (_) => const NavigationSettingsScreen()),
     );
 
-    if (!context.mounted) {
-      return;
-    }
+    if (!context.mounted) return;
 
     if (saved == true) {
-      // Tell AppShell to reload the saved layout.
       onNavigationChanged?.call();
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -71,7 +77,6 @@ class SettingsScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Настройки')),
-
       body: ListView(
         key: const PageStorageKey<String>('trucklink-settings'),
         physics: const ClampingScrollPhysics(),
@@ -96,16 +101,21 @@ class SettingsScreen extends StatelessWidget {
           // ==================================
           // APPEARANCE
           // ==================================
-          const _SettingsSection(
+          _SettingsSection(
             icon: Icons.palette_outlined,
             title: 'Оформление',
             description:
-                'Темы, акцентные цвета, градиенты '
-                'и внешний вид карточек.',
+                'Цвета интерфейса, размер и подсветка '
+                'панелей, стиль карточек '
+                'и скругление.',
+            active: true,
+            onTap: () {
+              _openAppearanceSettings(context);
+            },
           ),
 
           // ==================================
-          // HOME
+          // HOME DASHBOARD
           // ==================================
           const _SettingsSection(
             icon: Icons.dashboard_customize_outlined,
@@ -123,7 +133,7 @@ class SettingsScreen extends StatelessWidget {
             title: 'Навигация',
             description:
                 'Перестановка вкладок, закрепление, '
-                'скрытие и настройка меню «Ещё».',
+                'скрытие и объединение разделов.',
             active: true,
             onTap: () {
               _openNavigationSettings(context);
@@ -162,6 +172,7 @@ class _SettingsSection extends StatelessWidget {
   final IconData icon;
   final String title;
   final String description;
+
   final bool active;
   final VoidCallback? onTap;
 
@@ -182,6 +193,9 @@ class _SettingsSection extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // ============================
+                // ICON
+                // ============================
                 Container(
                   width: 46,
                   height: 46,
@@ -195,6 +209,9 @@ class _SettingsSection extends StatelessWidget {
 
                 const SizedBox(width: 14),
 
+                // ============================
+                // INFORMATION
+                // ============================
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -223,9 +240,11 @@ class _SettingsSection extends StatelessWidget {
                   ),
                 ),
 
+                // ============================
+                // NAVIGATION ARROW
+                // ============================
                 if (active) ...[
                   const SizedBox(width: 8),
-
                   Icon(Icons.chevron_right_rounded, color: scheme.primary),
                 ],
               ],

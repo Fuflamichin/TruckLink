@@ -4,18 +4,40 @@ import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:flutter/material.dart';
 
 import '../core/network/telemetry_connection.dart';
-import '../features/common/empty_state.dart';
 import '../features/dashboard/dashboard_screen.dart';
 import '../features/home/home_screen.dart';
 import '../features/jobs/job_screen.dart';
-import '../features/more/more_screen.dart';
 import '../features/settings/settings_screen.dart';
 import '../features/truck/truck_screen.dart';
+
 import 'navigation/navigation_config.dart';
 import 'navigation/navigation_layout_storage.dart';
+import 'navigation/trucklink_pill_navigation.dart';
 
 // ============================================
-// TRUCKLINK APPLICATION SHELL
+// COMMON SECTION ICONS
+// ============================================
+
+IconData _sectionIcon(TruckLinkSection section) {
+  return switch (section) {
+    TruckLinkSection.home => Icons.home_outlined,
+
+    TruckLinkSection.instruments => Icons.speed_outlined,
+
+    TruckLinkSection.truck => Icons.local_shipping_outlined,
+
+    TruckLinkSection.job => Icons.inventory_2_outlined,
+
+    TruckLinkSection.finances => Icons.account_balance_wallet_outlined,
+
+    TruckLinkSection.map => Icons.map_outlined,
+
+    TruckLinkSection.statistics => Icons.bar_chart_outlined,
+  };
+}
+
+// ============================================
+// APP SHELL
 // ============================================
 
 class AppShell extends StatefulWidget {
@@ -32,21 +54,29 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
+// ============================================
+// APP SHELL STATE
+// ============================================
+
 class _AppShellState extends State<AppShell> {
   static const String _morePageId = '__more__';
 
-  final NavigationLayoutStorage _navigationStorage = NavigationLayoutStorage();
+  // ==========================================
+  // STORAGE AND STATE
+  // ==========================================
 
-  final Set<String> _visitedPages = {};
+  final NavigationLayoutStorage _storage = NavigationLayoutStorage();
 
   final ValueNotifier<bool> _homeEditMode = ValueNotifier<bool>(false);
+
+  final Set<String> _visited = {};
 
   late _ResolvedNavigation _navigation;
   late String _selectedId;
 
   String? _lastMoreSelection;
 
-  int _navigationLoadGeneration = 0;
+  int _loadGeneration = 0;
 
   // ==========================================
   // INITIALIZATION
@@ -56,82 +86,71 @@ class _AppShellState extends State<AppShell> {
   void initState() {
     super.initState();
 
-    // Start with the default navigation.
-    // Saved preferences are loaded asynchronously.
     _navigation = _ResolvedNavigation.resolve(widget.layout, null);
 
-    _selectedId = _navigation.bottomItems.isNotEmpty
-        ? _navigation.bottomItems.first.id
-        : _morePageId;
+    _selectedId = _navigation.bottomItems.isEmpty
+        ? _morePageId
+        : _navigation.bottomItems.first.id;
 
-    _visitedPages.add(_selectedId);
+    _visited.add(_selectedId);
 
     unawaited(_reloadNavigation());
   }
 
   // ==========================================
-  // LOAD SAVED NAVIGATION
+  // RELOAD SAVED NAVIGATION
   // ==========================================
 
   Future<void> _reloadNavigation() async {
-    final generation = ++_navigationLoadGeneration;
+    final generation = ++_loadGeneration;
 
     SavedNavigationLayout? saved;
 
     try {
-      saved = await _navigationStorage.load();
+      saved = await _storage.load();
     } catch (error) {
-      debugPrint('TruckLink: failed to load navigation: $error');
+      debugPrint('TruckLink: cannot load navigation: $error');
     }
 
-    if (!mounted || generation != _navigationLoadGeneration) {
+    if (!mounted || generation != _loadGeneration) {
       return;
     }
 
-    final resolved = _ResolvedNavigation.resolve(widget.layout, saved);
+    final next = _ResolvedNavigation.resolve(widget.layout, saved);
 
     setState(() {
-      _navigation = resolved;
-      _validateCurrentSelection();
+      _navigation = next;
+      _validateSelection();
     });
   }
 
   // ==========================================
-  // KEEP CURRENT PAGE VALID
+  // VALIDATE SELECTED PAGE
   // ==========================================
 
-  void _validateCurrentSelection() {
+  void _validateSelection() {
     if (_lastMoreSelection != null &&
         !_navigation.moreItems.any((item) => item.id == _lastMoreSelection)) {
       _lastMoreSelection = null;
     }
 
-    // The "Ещё" page is always accessible.
-    if (_selectedId == _morePageId) {
+    if (_selectedId == _morePageId ||
+        _navigation.visibleItems.any((item) => item.id == _selectedId)) {
       return;
     }
 
-    final stillVisible = _navigation.visibleItems.any(
-      (item) => item.id == _selectedId,
-    );
-
-    if (stillVisible) {
-      return;
-    }
-
-    // The selected page was hidden or removed.
-    // Switch to the first pinned tab.
+    // Current page is hidden or removed.
     _homeEditMode.value = false;
 
-    _selectedId = _navigation.bottomItems.isNotEmpty
-        ? _navigation.bottomItems.first.id
-        : _morePageId;
+    _selectedId = _navigation.bottomItems.isEmpty
+        ? _morePageId
+        : _navigation.bottomItems.first.id;
 
-    _visitedPages.add(_selectedId);
+    _visited.add(_selectedId);
   }
 
   // ==========================================
-  // UPDATED WIDGET CONFIGURATION
+  // UPDATE APP SHELL
   // ==========================================
 
   @override
@@ -141,47 +160,41 @@ class _AppShellState extends State<AppShell> {
     if (oldWidget.layout != widget.layout) {
       _navigation = _ResolvedNavigation.resolve(widget.layout, null);
 
-      _validateCurrentSelection();
+      _validateSelection();
 
       unawaited(_reloadNavigation());
     }
   }
 
   // ==========================================
-  // SELECT A PAGE
+  // SELECT NAVIGATION PAGE
   // ==========================================
 
   void _selectPage(String id) {
-    if (id == _selectedId) {
+    if (_selectedId == id) {
       return;
     }
 
-    final isMorePage = id == _morePageId;
+    final isMore = id == _morePageId;
 
-    final item = _navigation.findById(id);
-
-    if (!isMorePage && item == null) {
+    if (!isMore && _navigation.findById(id) == null) {
       return;
     }
-
-    final belongsToMore = _navigation.moreItems.any(
-      (candidate) => candidate.id == id,
-    );
 
     _homeEditMode.value = false;
 
     setState(() {
       _selectedId = id;
-      _visitedPages.add(id);
+      _visited.add(id);
 
-      if (belongsToMore) {
+      if (_navigation.moreItems.any((item) => item.id == id)) {
         _lastMoreSelection = id;
       }
     });
   }
 
   // ==========================================
-  // SETTINGS
+  // OPEN SETTINGS
   // ==========================================
 
   Future<void> _openSettings() async {
@@ -192,8 +205,6 @@ class _AppShellState extends State<AppShell> {
         builder: (_) => SettingsScreen(
           connection: widget.connection,
 
-          // Apply changes immediately after
-          // the navigation editor saves them.
           onNavigationChanged: () {
             unawaited(_reloadNavigation());
           },
@@ -201,20 +212,16 @@ class _AppShellState extends State<AppShell> {
       ),
     );
 
-    if (!mounted) return;
-
-    // Also reload after the Settings route closes.
-    // This catches Reset and other storage changes,
-    // even when the navigation editor was closed
-    // using the Android Back button.
-    await _reloadNavigation();
+    if (mounted) {
+      await _reloadNavigation();
+    }
   }
 
   // ==========================================
-  // BUILD CONTENT FOR A SECTION
+  // CREATE SECTION PAGE
   // ==========================================
 
-  Widget _buildSection(TruckLinkSection section) {
+  Widget _sectionPage(TruckLinkSection section) {
     return switch (section) {
       TruckLinkSection.home => HomeScreen(
         connection: widget.connection,
@@ -229,126 +236,124 @@ class _AppShellState extends State<AppShell> {
 
       TruckLinkSection.job => JobScreen(connection: widget.connection),
 
-      TruckLinkSection.finances => const EmptyState(
+      TruckLinkSection.finances => const _ComingSoonPage(
         icon: Icons.account_balance_wallet_outlined,
         title: 'Финансы',
-        message:
-            'Баланс, доходы и расходы появятся '
-            'после подключения финансовых данных ETS2.',
+        description:
+            'История заработка, баланс '
+            'и расходы появятся позже.',
       ),
 
-      TruckLinkSection.map => const EmptyState(
+      TruckLinkSection.map => const _ComingSoonPage(
         icon: Icons.map_outlined,
         title: 'Карта',
-        message:
-            'Игровая карта, положение грузовика '
-            'и маршруты будут реализованы '
-            'в отдельном модуле.',
+        description:
+            'Игровая карта и маршрут '
+            'появятся позже.',
       ),
 
-      TruckLinkSection.statistics => const EmptyState(
+      TruckLinkSection.statistics => const _ComingSoonPage(
         icon: Icons.bar_chart_outlined,
         title: 'Статистика',
-        message:
-            'Здесь появятся история рейсов, '
-            'пробег, доходы и статистика перевозок.',
+        description:
+            'Статистика рейсов и история '
+            'появятся позже.',
       ),
     };
   }
 
   // ==========================================
-  // BUILD CONTENT FOR A NAVIGATION ITEM
+  // CREATE NAVIGATION ITEM PAGE
   // ==========================================
 
-  Widget _buildNavigationItem(NavigationItemConfig item) {
+  Widget _itemPage(_ShellNavigationItem item) {
     if (item.sections.length == 1) {
-      return _buildSection(item.sections.first);
+      return _sectionPage(item.sections.first);
     }
 
-    return _CombinedSectionsPage(item: item, pageBuilder: _buildSection);
+    return _CombinedSectionsPage(item: item, pageBuilder: _sectionPage);
   }
 
   // ==========================================
-  // NAVIGATION ICONS
+  // NAVIGATION ITEM ICON
   // ==========================================
 
-  IconData _iconFor(NavigationItemConfig item) {
+  IconData _icon(_ShellNavigationItem item) {
     if (item.sections.length != 1) {
       return Icons.layers_outlined;
     }
 
+    return _sectionIcon(item.sections.first);
+  }
+
+  // ==========================================
+  // NAVIGATION ITEM ACTIVE ICON
+  // ==========================================
+
+  IconData _activeIcon(_ShellNavigationItem item) {
+    if (item.sections.length != 1) {
+      return Icons.layers_rounded;
+    }
+
     return switch (item.sections.first) {
-      TruckLinkSection.home => Icons.home_outlined,
+      TruckLinkSection.home => Icons.home_rounded,
 
       TruckLinkSection.instruments => Icons.speed,
 
-      TruckLinkSection.truck => Icons.local_shipping_outlined,
+      TruckLinkSection.truck => Icons.local_shipping_rounded,
 
-      TruckLinkSection.job => Icons.inventory_2_outlined,
+      TruckLinkSection.job => Icons.inventory_2_rounded,
 
-      TruckLinkSection.finances => Icons.account_balance_wallet_outlined,
+      TruckLinkSection.finances => Icons.account_balance_wallet_rounded,
 
-      TruckLinkSection.map => Icons.map_outlined,
+      TruckLinkSection.map => Icons.map_rounded,
 
-      TruckLinkSection.statistics => Icons.bar_chart_outlined,
+      TruckLinkSection.statistics => Icons.bar_chart_rounded,
     };
   }
 
   // ==========================================
-  // SHARED APP BAR
+  // APP BAR
   // ==========================================
 
-  PreferredSizeWidget _buildAppBar(
-    NavigationItemConfig? selectedItem,
-    bool isMorePage,
-  ) {
-    final isInstruments =
-        selectedItem != null &&
-        selectedItem.sections.length == 1 &&
-        selectedItem.sections.first == TruckLinkSection.instruments;
-
-    final isHome =
-        selectedItem != null &&
-        selectedItem.sections.length == 1 &&
-        selectedItem.sections.first == TruckLinkSection.home;
-
-    final title = isMorePage || isInstruments
-        ? 'TruckLink'
-        : selectedItem?.title ?? 'TruckLink';
+  PreferredSizeWidget _appBar(_ShellNavigationItem? item) {
+    final hasHome =
+        item != null && item.sections.contains(TruckLinkSection.home);
 
     return AppBar(
-      title: Text(title),
-      centerTitle: false,
+      title: Text(item?.title ?? 'TruckLink'),
+
       automaticallyImplyLeading: false,
+
       actions: [
-        // Home editing remains available even
-        // if Home was moved to the "Ещё" menu.
-        if (isHome)
+        // ====================================
+        // HOME EDITING
+        // ====================================
+        if (hasHome)
           ValueListenableBuilder<bool>(
             valueListenable: _homeEditMode,
-            builder: (context, isEditing, child) {
+            builder: (context, editing, child) {
               return IconButton(
-                tooltip: isEditing
-                    ? 'Завершить редактирование'
-                    : 'Редактировать главную',
-                icon: Icon(
-                  isEditing ? Icons.check_rounded : Icons.edit_outlined,
-                ),
+                tooltip: editing ? 'Готово' : 'Редактировать главную',
+
+                icon: Icon(editing ? Icons.check_rounded : Icons.edit_outlined),
+
                 onPressed: () {
-                  _homeEditMode.value = !isEditing;
+                  _homeEditMode.value = !editing;
                 },
               );
             },
           ),
 
-        // Always accessible: even if all the
-        // optional sections are hidden.
+        // ====================================
+        // SETTINGS
+        // ====================================
         IconButton(
-          tooltip: 'Настройки TruckLink',
+          tooltip: 'Настройки',
+          icon: const Icon(Icons.settings_outlined),
           onPressed: () {
             unawaited(_openSettings());
           },
-          icon: const Icon(Icons.settings_outlined),
         ),
 
         const SizedBox(width: 8),
@@ -357,139 +362,123 @@ class _AppShellState extends State<AppShell> {
   }
 
   // ==========================================
-  // BOTTOM NAVIGATION
+  // NEW FLOATING BOTTOM NAVIGATION
   // ==========================================
 
-  Widget _buildBottomNavigation() {
-    final bottomItems = _navigation.bottomItems;
+  Widget _bottomBar() {
+    final bottom = _navigation.bottomItems;
 
-    final moreSelected =
+    final isMoreActive =
         _selectedId == _morePageId ||
         _navigation.moreItems.any((item) => item.id == _selectedId);
 
-    final selectedBottomIndex = bottomItems.indexWhere(
-      (item) => item.id == _selectedId,
-    );
+    final bottomIndex = bottom.indexWhere((item) => item.id == _selectedId);
 
-    final selectedIndex = moreSelected
-        ? bottomItems.length
-        : selectedBottomIndex < 0
-        ? 0
-        : selectedBottomIndex;
+    final selectedIndex = isMoreActive
+        ? bottom.length
+        : bottomIndex >= 0
+        ? bottomIndex
+        : 0;
 
-    return NavigationBar(
-      selectedIndex: selectedIndex,
+    // The bottom bar is now an icon-only
+    // floating rounded pill, as in the
+    // TruckLink design reference.
+    return SafeArea(
+      top: false,
+      minimum: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 7, 16, 0),
+        child: TruckLinkPillNavigation(
+          style: TruckLinkPillStyle.bottom,
+          selectedIndex: selectedIndex,
 
-      labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+          items: [
+            for (final item in bottom)
+              TruckLinkPillItem(
+                label: item.title,
+                icon: _icon(item),
+                activeIcon: _activeIcon(item),
+              ),
 
-      // Brand colors come from TruckLinkTheme.dark.
-      // No hardcoded colors are needed here.
-      destinations: [
-        for (final item in bottomItems)
-          NavigationDestination(icon: Icon(_iconFor(item)), label: item.title),
+            const TruckLinkPillItem(
+              label: 'Ещё',
+              icon: Icons.more_horiz_rounded,
+              activeIcon: Icons.more_rounded,
+            ),
+          ],
 
-        const NavigationDestination(
-          icon: Icon(Icons.more_horiz_rounded),
-          selectedIcon: Icon(Icons.more_rounded),
-          label: 'Ещё',
+          onSelected: (index) {
+            if (index == bottom.length) {
+              _selectPage(_morePageId);
+              return;
+            }
+
+            if (index >= 0 && index < bottom.length) {
+              _selectPage(bottom[index].id);
+            }
+          },
         ),
-      ],
-
-      onDestinationSelected: (index) {
-        if (index == bottomItems.length) {
-          _selectPage(_morePageId);
-          return;
-        }
-
-        if (index >= 0 && index < bottomItems.length) {
-          _selectPage(bottomItems[index].id);
-        }
-      },
+      ),
     );
   }
 
   // ==========================================
-  // BUILD
+  // BUILD APP
   // ==========================================
 
   @override
   Widget build(BuildContext context) {
-    final bottomItems = _navigation.bottomItems;
-    final moreItems = _navigation.moreItems;
-    final items = _navigation.visibleItems;
-
-    if (bottomItems.isEmpty) {
-      return const Scaffold(
-        body: EmptyState(
-          icon: Icons.warning_amber_rounded,
-          title: 'Нет разделов',
-          message:
-              'В конфигурации навигации '
-              'отсутствуют доступные разделы.',
-        ),
-      );
-    }
+    final pages = _navigation.visibleItems;
 
     final isMorePage = _selectedId == _morePageId;
 
     final selectedItem = _navigation.findById(_selectedId);
 
-    final pageIndex = isMorePage
-        ? items.length
-        : items.indexWhere((item) => item.id == _selectedId);
+    final index = isMorePage
+        ? pages.length
+        : pages.indexWhere((item) => item.id == _selectedId);
 
     return Scaffold(
-      appBar: _buildAppBar(selectedItem, isMorePage),
+      appBar: _appBar(selectedItem),
 
       // Keep visited pages mounted.
-      //
-      // Their keys are based on stable IDs,
-      // not their position in the tab bar.
       body: IndexedStack(
-        index: pageIndex < 0 ? 0 : pageIndex,
+        index: index < 0 ? 0 : index,
         children: [
-          for (final item in items)
+          for (final item in pages)
             KeyedSubtree(
               key: ValueKey(item.id),
-              child: _visitedPages.contains(item.id)
-                  ? _buildNavigationItem(item)
+              child: _visited.contains(item.id)
+                  ? _itemPage(item)
                   : const SizedBox.shrink(),
             ),
 
           KeyedSubtree(
             key: const ValueKey(_morePageId),
-            child: _visitedPages.contains(_morePageId)
-                ? moreItems.isEmpty
-                      ? const EmptyState(
-                          icon: Icons.widgets_outlined,
-                          title: 'Нет дополнительных разделов',
-                          message:
-                              'Все доступные разделы '
-                              'закреплены или скрыты. '
-                              'Изменить это можно '
-                              'в настройках навигации.',
-                        )
-                      : MoreScreen(
-                          items: moreItems,
-                          selectedId: _lastMoreSelection,
-                          onSelect: _selectPage,
-                        )
+            child: _visited.contains(_morePageId)
+                ? _MoreNavigationPage(
+                    items: _navigation.moreItems,
+                    selectedId: _lastMoreSelection,
+                    iconFor: _icon,
+                    onSelect: _selectPage,
+                  )
                 : const SizedBox.shrink(),
           ),
         ],
       ),
 
-      bottomNavigationBar: _buildBottomNavigation(),
+      // New custom pill navigation.
+      bottomNavigationBar: _bottomBar(),
     );
   }
 
   // ==========================================
-  // DISPOSE
+  // CLEANUP
   // ==========================================
 
   @override
   void dispose() {
-    ++_navigationLoadGeneration;
+    ++_loadGeneration;
 
     _homeEditMode.dispose();
 
@@ -498,26 +487,45 @@ class _AppShellState extends State<AppShell> {
 }
 
 // ============================================
+// SHELL NAVIGATION ITEM
+// ============================================
+
+class _ShellNavigationItem {
+  const _ShellNavigationItem({
+    required this.id,
+    required this.title,
+    required this.sections,
+  });
+
+  final String id;
+  final String title;
+  final List<TruckLinkSection> sections;
+
+  factory _ShellNavigationItem.fromConfig(NavigationItemConfig item) {
+    return _ShellNavigationItem(
+      id: item.id,
+      title: item.title,
+      sections: List<TruckLinkSection>.unmodifiable(item.sections),
+    );
+  }
+}
+
+// ============================================
 // RESOLVED NAVIGATION
 // ============================================
 
-/// Converts a saved list of navigation IDs into
-/// real NavigationItemConfig objects.
-///
-/// This adapter leaves navigation_config.dart
-/// and its existing public API unchanged.
 class _ResolvedNavigation {
   const _ResolvedNavigation({
     required this.bottomItems,
     required this.moreItems,
   });
 
-  final List<NavigationItemConfig> bottomItems;
-  final List<NavigationItemConfig> moreItems;
+  final List<_ShellNavigationItem> bottomItems;
+  final List<_ShellNavigationItem> moreItems;
 
-  List<NavigationItemConfig> get visibleItems => [...bottomItems, ...moreItems];
+  List<_ShellNavigationItem> get visibleItems => [...bottomItems, ...moreItems];
 
-  NavigationItemConfig? findById(String id) {
+  _ShellNavigationItem? findById(String id) {
     for (final item in visibleItems) {
       if (item.id == id) {
         return item;
@@ -528,17 +536,16 @@ class _ResolvedNavigation {
   }
 
   // ==========================================
-  // RESOLVE DEFAULT OR SAVED CONFIGURATION
+  // RESOLVE SAVED NAVIGATION
   // ==========================================
 
   factory _ResolvedNavigation.resolve(
     NavigationLayout layout,
     SavedNavigationLayout? saved,
   ) {
-    const maxBottomItems = 4;
+    const maxBottom = 4;
 
-    // Existing NavigationLayout is the catalog.
-    // Saving a layout never creates new sections.
+    // Existing configuration is the catalog.
     final catalog = <String, NavigationItemConfig>{
       for (final item in [
         ...layout.visibleItems,
@@ -548,18 +555,74 @@ class _ResolvedNavigation {
         item.id: item,
     };
 
-    final bottom = <NavigationItemConfig>[];
-    final more = <NavigationItemConfig>[];
+    // ========================================
+    // RESTORE COMBINED GROUPS
+    // ========================================
+
+    final groupItems = <String, _ShellNavigationItem>{};
+
+    final groupedMemberIds = <String>{};
+
+    final placedGroups = <String>{...?saved?.bottomIds, ...?saved?.moreIds};
+
+    for (final group in saved?.groups ?? const <SavedNavigationGroup>[]) {
+      if (!placedGroups.contains(group.id) || catalog.containsKey(group.id)) {
+        continue;
+      }
+
+      if (!group.memberIds.every(catalog.containsKey) ||
+          group.memberIds.any(groupedMemberIds.contains)) {
+        continue;
+      }
+
+      final sections = <TruckLinkSection>[];
+
+      final seenSections = <TruckLinkSection>{};
+
+      for (final memberId in group.memberIds) {
+        for (final section in catalog[memberId]!.sections) {
+          if (seenSections.add(section)) {
+            sections.add(section);
+          }
+        }
+      }
+
+      if (sections.length < 2) {
+        continue;
+      }
+
+      groupItems[group.id] = _ShellNavigationItem(
+        id: group.id,
+        title: group.title,
+        sections: List<TruckLinkSection>.unmodifiable(sections),
+      );
+
+      groupedMemberIds.addAll(group.memberIds);
+    }
+
+    // ========================================
+    // BOTTOM / MORE
+    // ========================================
+
+    final bottom = <_ShellNavigationItem>[];
+    final more = <_ShellNavigationItem>[];
+
     final used = <String>{};
 
-    void addItem(String id, List<NavigationItemConfig> target) {
-      final item = catalog[id];
-
-      if (item == null || !used.add(id)) {
+    void add(String id, List<_ShellNavigationItem> target) {
+      if (groupedMemberIds.contains(id) || !used.add(id)) {
         return;
       }
 
-      target.add(item);
+      final item =
+          groupItems[id] ??
+          (catalog[id] == null
+              ? null
+              : _ShellNavigationItem.fromConfig(catalog[id]!));
+
+      if (item != null) {
+        target.add(item);
+      }
     }
 
     // ========================================
@@ -570,11 +633,10 @@ class _ResolvedNavigation {
         saved?.bottomIds ?? layout.bottomItems.map((item) => item.id);
 
     for (final id in requestedBottom) {
-      if (bottom.length < maxBottomItems) {
-        addItem(id, bottom);
+      if (bottom.length < maxBottom) {
+        add(id, bottom);
       } else {
-        // Move overflow to "Ещё".
-        addItem(id, more);
+        add(id, more);
       }
     }
 
@@ -586,17 +648,15 @@ class _ResolvedNavigation {
         saved?.moreIds ?? layout.moreItems.map((item) => item.id);
 
     for (final id in requestedMore) {
-      addItem(id, more);
+      add(id, more);
     }
 
     // ========================================
     // HIDDEN ITEMS
     // ========================================
 
-    // Hidden sections are marked as handled,
-    // but are not included in either visible list.
     for (final id in saved?.hiddenIds ?? const <String>[]) {
-      if (catalog.containsKey(id)) {
+      if (catalog.containsKey(id) && !groupedMemberIds.contains(id)) {
         used.add(id);
       }
     }
@@ -605,11 +665,9 @@ class _ResolvedNavigation {
     // NEW SECTIONS
     // ========================================
 
-    // Newly added sections that are absent from
-    // old saved preferences appear in "Ещё".
     for (final id in catalog.keys) {
-      if (!used.contains(id)) {
-        addItem(id, more);
+      if (!used.contains(id) && !groupedMemberIds.contains(id)) {
+        add(id, more);
       }
     }
 
@@ -617,57 +675,228 @@ class _ResolvedNavigation {
     // SAFE FALLBACK
     // ========================================
 
-    // At least one regular bottom tab must exist.
-    // This also protects against damaged settings.
-    if (bottom.isEmpty) {
-      if (more.isNotEmpty) {
-        bottom.add(more.removeAt(0));
-      } else if (catalog.isNotEmpty) {
-        bottom.add(catalog.values.first);
-      }
+    if (bottom.isEmpty && more.isNotEmpty) {
+      bottom.add(more.removeAt(0));
+    }
+
+    if (bottom.isEmpty && catalog.isNotEmpty) {
+      bottom.add(_ShellNavigationItem.fromConfig(catalog.values.first));
     }
 
     return _ResolvedNavigation(
-      bottomItems: List.unmodifiable(bottom),
-      moreItems: List.unmodifiable(more),
+      bottomItems: List<_ShellNavigationItem>.unmodifiable(bottom),
+      moreItems: List<_ShellNavigationItem>.unmodifiable(more),
     );
   }
 }
 
 // ============================================
-// COMBINED NAVIGATION SECTIONS
+// COMBINED GROUP PAGE
 // ============================================
 
 class _CombinedSectionsPage extends StatelessWidget {
   const _CombinedSectionsPage({required this.item, required this.pageBuilder});
 
-  final NavigationItemConfig item;
+  final _ShellNavigationItem item;
+
   final Widget Function(TruckLinkSection) pageBuilder;
+
+  // ==========================================
+  // BUILD
+  // ==========================================
 
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: item.sections.length,
-      child: Column(
-        children: [
-          Material(
-            color: Theme.of(context).colorScheme.surface,
-            child: TabBar(
-              isScrollable: true,
-              tabs: [
-                for (final section in item.sections) Tab(text: section.title),
-              ],
-            ),
-          ),
+      key: ValueKey(
+        '${item.id}:'
+        '${item.sections.map((section) => section.name).join(",")}',
+      ),
 
-          Expanded(
-            child: TabBarView(
-              children: [
-                for (final section in item.sections) pageBuilder(section),
-              ],
+      length: item.sections.length,
+
+      child: Builder(
+        builder: (tabContext) {
+          final controller = DefaultTabController.of(tabContext);
+
+          return Column(
+            children: [
+              // ==============================
+              // FLOATING INNER TAB BAR
+              // ==============================
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+
+                child: AnimatedBuilder(
+                  animation: controller,
+
+                  builder: (context, child) {
+                    return TruckLinkPillNavigation(
+                      style: TruckLinkPillStyle.group,
+                      selectedIndex: controller.index,
+
+                      items: [
+                        for (final section in item.sections)
+                          TruckLinkPillItem(
+                            label: section.title,
+                            icon: _sectionIcon(section),
+                          ),
+                      ],
+
+                      onSelected: (index) {
+                        controller.animateTo(
+                          index,
+                          duration: const Duration(milliseconds: 260),
+                          curve: Curves.easeInOutCubic,
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+
+              // ==============================
+              // INNER CONTENT
+              // ==============================
+              Expanded(
+                child: TabBarView(
+                  controller: controller,
+                  children: [
+                    for (final section in item.sections) pageBuilder(section),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ============================================
+// MORE NAVIGATION PAGE
+// ============================================
+
+class _MoreNavigationPage extends StatelessWidget {
+  const _MoreNavigationPage({
+    required this.items,
+    required this.selectedId,
+    required this.iconFor,
+    required this.onSelect,
+  });
+
+  final List<_ShellNavigationItem> items;
+
+  final String? selectedId;
+
+  final IconData Function(_ShellNavigationItem) iconFor;
+
+  final ValueChanged<String> onSelect;
+
+  // ==========================================
+  // BUILD
+  // ==========================================
+
+  @override
+  Widget build(BuildContext context) {
+    if (items.isEmpty) {
+      return const _ComingSoonPage(
+        icon: Icons.widgets_outlined,
+        title: 'Нет дополнительных разделов',
+        description:
+            'Их можно добавить '
+            'в настройках навигации.',
+      );
+    }
+
+    final scheme = Theme.of(context).colorScheme;
+
+    return ListView(
+      key: const PageStorageKey<String>('trucklink-more'),
+
+      padding: const EdgeInsets.all(16),
+
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 4, 4, 16),
+
+          child: Text(
+            'Дополнительные разделы',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+        ),
+
+        for (final item in items)
+          Card(
+            margin: const EdgeInsets.only(bottom: 10),
+
+            child: ListTile(
+              leading: Icon(iconFor(item), color: scheme.primary),
+
+              title: Text(item.title),
+
+              subtitle: item.sections.length > 1
+                  ? Text(
+                      item.sections.map((section) => section.title).join(' · '),
+                    )
+                  : null,
+
+              selected: item.id == selectedId,
+
+              trailing: const Icon(Icons.chevron_right_rounded),
+
+              onTap: () {
+                onSelect(item.id);
+              },
             ),
           ),
-        ],
+      ],
+    );
+  }
+}
+
+// ============================================
+// COMING SOON PAGE
+// ============================================
+
+class _ComingSoonPage extends StatelessWidget {
+  const _ComingSoonPage({
+    required this.icon,
+    required this.title,
+    required this.description,
+  });
+
+  final IconData icon;
+  final String title;
+  final String description;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 52, color: theme.colorScheme.primary),
+
+            const SizedBox(height: 16),
+
+            Text(
+              title,
+              style: theme.textTheme.titleLarge,
+              textAlign: TextAlign.center,
+            ),
+
+            const SizedBox(height: 10),
+
+            Text(description, textAlign: TextAlign.center),
+          ],
+        ),
       ),
     );
   }
