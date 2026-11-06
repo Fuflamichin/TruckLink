@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:telemetry_core/telemetry_core.dart';
 
 import '../../core/network/telemetry_connection.dart';
+import 'data/home_layout_storage.dart';
 
 // ============================================
 // AVAILABLE HOME METRICS
@@ -32,12 +35,7 @@ enum HomeMetric {
 // NUMBER FORMATTING
 // ============================================
 
-/// Displays telemetry as whole numbers.
-///
-/// Examples:
-/// 82.7 -> 83
-/// 100.0 -> 100
-/// 0.45 -> 0
+/// Displays whole numbers without decimals.
 String _wholeNumber(double? value, {String unit = ''}) {
   if (value == null || !value.isFinite) {
     return '—';
@@ -131,11 +129,11 @@ extension HomeMetricInfo on HomeMetric {
   };
 
   // ==========================================
-  // LIVE TELEMETRY VALUE
+  // LIVE TELEMETRY VALUES
   // ==========================================
 
   String formatValue(TruckSnapshot? snapshot) {
-    // Financial balance is not available yet.
+    // Finance integration is not available yet.
     if (this == HomeMetric.balance) {
       return 'Нет данных';
     }
@@ -227,8 +225,6 @@ class HomeScreen extends StatefulWidget {
   });
 
   final TelemetryConnection connection;
-
-  /// Controlled by the edit button in AppShell.
   final ValueListenable<bool> editMode;
 
   @override
@@ -236,23 +232,168 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // Only visible metrics are stored here.
-  // Their order is also their display order.
-  final List<HomeMetric> _metrics = [
+  // Shared storage instance keeps write ordering
+  // consistent even if this screen is recreated.
+  static final HomeLayoutStorage _storage = HomeLayoutStorage();
+
+  // Default cards used on the first launch.
+  static const List<HomeMetric> _defaultMetrics = [
     HomeMetric.speed,
     HomeMetric.speedLimit,
     HomeMetric.cargo,
     HomeMetric.balance,
   ];
 
+  final List<HomeMetric> _metrics = List<HomeMetric>.of(_defaultMetrics);
+
+  bool _layoutLoaded = false;
+  bool _saveWarningShown = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Load saved layout without blocking the
+    // Flutter application startup.
+    unawaited(_loadSavedLayout());
+  }
+
+  // ==========================================
+  // LOAD SAVED LAYOUT
+  // ==========================================
+
+  Future<void> _loadSavedLayout() async {
+    try {
+      final savedIds = await _storage.loadMetricIds();
+
+      if (!mounted) return;
+
+      // null means first launch: keep defaults.
+      if (savedIds == null) {
+        setState(() {
+          _layoutLoaded = true;
+        });
+        return;
+      }
+
+      // Map stored names to available enum values.
+      //
+      // Unknown identifiers are ignored so future
+      // changes to telemetry do not crash the app.
+      final metricById = {
+        for (final metric in HomeMetric.values) metric.name: metric,
+      };
+
+      final restored = <HomeMetric>[];
+      final seen = <HomeMetric>{};
+
+      for (final id in savedIds) {
+        final metric = metricById[id];
+
+        if (metric == null) continue;
+
+        if (seen.add(metric)) {
+          restored.add(metric);
+        }
+      }
+
+      // An empty saved list is valid:
+      // the user intentionally removed everything.
+      //
+      // If the saved list contains only unknown IDs,
+      // keep the defaults rather than showing
+      // an unexpectedly empty dashboard.
+      final useRestored = savedIds.isEmpty || restored.isNotEmpty;
+
+      setState(() {
+        if (useRestored) {
+          _metrics
+            ..clear()
+            ..addAll(restored);
+        }
+
+        _layoutLoaded = true;
+      });
+    } catch (error) {
+      debugPrint('TruckLink: unable to load home layout: $error');
+
+      if (!mounted) return;
+
+      // Keep the default layout when local
+      // preferences cannot be read.
+      setState(() {
+        _layoutLoaded = true;
+      });
+
+      _showStorageWarning('Не удалось загрузить настройки главной.');
+    }
+  }
+
+  // ==========================================
+  // SAVE CURRENT LAYOUT
+  // ==========================================
+
+  void _saveLayout() {
+    if (!_layoutLoaded) return;
+
+    // Save identifiers, not enum indexes.
+    //
+    // Adding new enum values later will not
+    // invalidate existing saved layouts.
+    final ids = _metrics.map((metric) => metric.name).toList(growable: false);
+
+    unawaited(
+      _storage
+          .saveMetricIds(ids)
+          .then<void>(
+            (_) {
+              _saveWarningShown = false;
+            },
+            onError: (Object error, StackTrace stackTrace) {
+              debugPrint(
+                'TruckLink: unable to save home layout: '
+                '$error',
+              );
+
+              if (!mounted || _saveWarningShown) {
+                return;
+              }
+
+              _saveWarningShown = true;
+
+              _showStorageWarning(
+                'Не удалось сохранить расположение '
+                'карточек.',
+              );
+            },
+          ),
+    );
+  }
+
+  void _showStorageWarning(String message) {
+    if (!mounted) return;
+
+    final messenger = ScaffoldMessenger.maybeOf(context);
+
+    messenger?.showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
+    );
+  }
+
   // ==========================================
   // REMOVE METRIC
   // ==========================================
 
   void _removeMetric(HomeMetric metric) {
+    if (!_layoutLoaded) return;
+
+    if (!_metrics.contains(metric)) return;
+
     setState(() {
       _metrics.remove(metric);
     });
+
+    _saveLayout();
   }
 
   // ==========================================
@@ -260,6 +401,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // ==========================================
 
   void _moveMetric(HomeMetric source, HomeMetric destination) {
+    if (!_layoutLoaded) return;
     if (source == destination) return;
 
     final sourceIndex = _metrics.indexOf(source);
@@ -273,6 +415,8 @@ class _HomeScreenState extends State<HomeScreen> {
       final item = _metrics.removeAt(sourceIndex);
       _metrics.insert(destinationIndex, item);
     });
+
+    _saveLayout();
   }
 
   // ==========================================
@@ -280,6 +424,8 @@ class _HomeScreenState extends State<HomeScreen> {
   // ==========================================
 
   Future<void> _showAddMetrics() async {
+    if (!_layoutLoaded) return;
+
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -390,15 +536,18 @@ class _HomeScreenState extends State<HomeScreen> {
                                     Icons.add_circle_outline,
                                   ),
                                   onTap: () {
-                                    setState(() {
-                                      if (!_metrics.contains(metric)) {
-                                        _metrics.add(metric);
-                                      }
-                                    });
+                                    if (!mounted) return;
 
-                                    // Update the sheet without
-                                    // closing it. Multiple metrics
-                                    // can be added in one visit.
+                                    if (!_metrics.contains(metric)) {
+                                      setState(() {
+                                        _metrics.add(metric);
+                                      });
+
+                                      _saveLayout();
+                                    }
+
+                                    // Keep the sheet open
+                                    // to add several metrics.
                                     setSheetState(() {});
                                   },
                                 ),
@@ -440,6 +589,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Wait for preferences before allowing edits.
+    // Otherwise an asynchronous load could replace
+    // the user's newly made changes.
+    if (!_layoutLoaded) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
     return ValueListenableBuilder<bool>(
       valueListenable: widget.editMode,
       builder: (context, isEditing, child) {
@@ -465,9 +621,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             isEditing ? 'Редактирование' : 'Мой TruckLink',
                             style: Theme.of(context).textTheme.headlineMedium,
                           ),
-
                           const SizedBox(height: 7),
-
                           Text(
                             isEditing
                                 ? 'Удерживай карточку и '
@@ -647,9 +801,6 @@ class _HomeGridItem extends StatelessWidget {
                   color: highlighted ? scheme.primary : Colors.transparent,
                 ),
               ),
-
-              // Long press enables dragging while
-              // normal vertical swipes still scroll.
               child: LongPressDraggable<HomeMetric>(
                 data: metric,
                 maxSimultaneousDrags: 1,
