@@ -1,25 +1,14 @@
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:telemetry_core/telemetry_core.dart';
 
+import '../../core/formatting/telemetry_format.dart';
 import '../../core/network/telemetry_connection.dart';
 
 // ============================================
-// DASHBOARD SCREEN
+// INSTRUMENTS DASHBOARD
 // ============================================
 
-/// TruckLink instrument dashboard.
-///
-/// This screen displays telemetry only.
-///
-/// Connection management is available in:
-/// Settings -> Connection.
-///
-/// AppShell provides the shared AppBar and
-/// bottom navigation.
-///
-/// TelemetryConnection is owned by the app,
-/// not by this screen.
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key, required this.connection});
 
@@ -31,9 +20,6 @@ class DashboardScreen extends StatelessWidget {
       key: const PageStorageKey<String>('trucklink-dashboard-scroll'),
       physics: const ClampingScrollPhysics(),
       slivers: [
-        // ==================================
-        // SCREEN HEADER
-        // ==================================
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
           sliver: SliverToBoxAdapter(
@@ -44,9 +30,7 @@ class DashboardScreen extends StatelessWidget {
                   'Приборы',
                   style: Theme.of(context).textTheme.headlineMedium,
                 ),
-
                 const SizedBox(height: 6),
-
                 Text(
                   'Телеметрия грузовика '
                   'в реальном времени',
@@ -57,9 +41,6 @@ class DashboardScreen extends StatelessWidget {
           ),
         ),
 
-        // ==================================
-        // MAIN METRICS HEADER
-        // ==================================
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(20, 26, 20, 12),
           sliver: SliverToBoxAdapter(
@@ -70,9 +51,6 @@ class DashboardScreen extends StatelessWidget {
           ),
         ),
 
-        // ==================================
-        // TELEMETRY GRID
-        // ==================================
         SliverPadding(
           padding: const EdgeInsets.symmetric(horizontal: 12),
           sliver: SliverLayoutBuilder(
@@ -100,9 +78,6 @@ class DashboardScreen extends StatelessWidget {
           ),
         ),
 
-        // ==================================
-        // ADDITIONAL METRICS HEADER
-        // ==================================
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(20, 26, 20, 12),
           sliver: SliverToBoxAdapter(
@@ -113,9 +88,6 @@ class DashboardScreen extends StatelessWidget {
           ),
         ),
 
-        // ==================================
-        // ADDITIONAL METRICS CARD
-        // ==================================
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
           sliver: SliverToBoxAdapter(
@@ -128,17 +100,13 @@ class DashboardScreen extends StatelessWidget {
 }
 
 // ============================================
-// METRIC TYPES
+// MAIN METRICS
 // ============================================
 
 enum _MetricKind { speed, rpm, gear, fuel, temperature, engineWear }
 
-// ============================================
-// METRIC METADATA
-// ============================================
-
-String _metricTitle(_MetricKind metric) {
-  return switch (metric) {
+extension _MetricInfo on _MetricKind {
+  String get title => switch (this) {
     _MetricKind.speed => 'Скорость',
     _MetricKind.rpm => 'Обороты',
     _MetricKind.gear => 'Передача',
@@ -146,10 +114,8 @@ String _metricTitle(_MetricKind metric) {
     _MetricKind.temperature => 'Температура',
     _MetricKind.engineWear => 'Износ двигателя',
   };
-}
 
-String _metricUnit(_MetricKind metric) {
-  return switch (metric) {
+  String get unit => switch (this) {
     _MetricKind.speed => 'км/ч',
     _MetricKind.rpm => 'RPM',
     _MetricKind.gear => '',
@@ -157,10 +123,8 @@ String _metricUnit(_MetricKind metric) {
     _MetricKind.temperature => '°C',
     _MetricKind.engineWear => '%',
   };
-}
 
-IconData _metricIcon(_MetricKind metric) {
-  return switch (metric) {
+  IconData get icon => switch (this) {
     _MetricKind.speed => Icons.speed,
     _MetricKind.rpm => Icons.autorenew,
     _MetricKind.gear => Icons.settings,
@@ -168,53 +132,42 @@ IconData _metricIcon(_MetricKind metric) {
     _MetricKind.temperature => Icons.thermostat,
     _MetricKind.engineWear => Icons.build_circle_outlined,
   };
-}
 
-// ============================================
-// METRIC FORMATTING
-// ============================================
+  String formatValue(TruckSnapshot? snapshot) {
+    if (snapshot == null) {
+      return TelemetryFormat.unavailable;
+    }
 
-String _metricValue(_MetricKind metric, TruckSnapshot? snapshot) {
-  if (snapshot == null) {
-    return '—';
+    return switch (this) {
+      _MetricKind.speed => TelemetryFormat.integer(
+        snapshot.speedKmh,
+        absolute: true,
+      ),
+
+      _MetricKind.rpm => TelemetryFormat.integer(snapshot.rpm),
+
+      _MetricKind.gear => TelemetryFormat.gear(snapshot.gear),
+
+      _MetricKind.fuel =>
+        snapshot.fuelCapacityLiters <= 0
+            ? TelemetryFormat.unavailable
+            : TelemetryFormat.integer(snapshot.fuelPercent),
+
+      _MetricKind.temperature => TelemetryFormat.integer(
+        snapshot.waterTemperatureC,
+      ),
+
+      _MetricKind.engineWear => TelemetryFormat.integer(
+        snapshot.engineWearPercent,
+      ),
+    };
   }
-
-  return switch (metric) {
-    _MetricKind.speed => snapshot.speedKmh.abs().toStringAsFixed(1),
-
-    _MetricKind.rpm => snapshot.rpm.toStringAsFixed(0),
-
-    _MetricKind.gear => _formatGear(snapshot.gear),
-
-    _MetricKind.fuel => snapshot.fuelPercent.toStringAsFixed(0),
-
-    _MetricKind.temperature =>
-      snapshot.waterTemperatureC?.toStringAsFixed(0) ?? '—',
-
-    _MetricKind.engineWear =>
-      snapshot.engineWearPercent?.toStringAsFixed(1) ?? '—',
-  };
-}
-
-String _formatGear(int gear) {
-  if (gear == 0) return 'N';
-
-  if (gear < 0) {
-    return 'R${gear.abs()}';
-  }
-
-  return gear.toString();
 }
 
 // ============================================
-// OPTIMIZED METRIC CARD
+// OPTIMIZED MAIN METRIC CARD
 // ============================================
 
-/// Each metric card listens to the shared
-/// telemetry controller independently.
-///
-/// It rebuilds only when its displayed
-/// formatted value changes.
 class _MetricCard extends StatefulWidget {
   const _MetricCard({
     super.key,
@@ -242,7 +195,7 @@ class _MetricCardState extends State<_MetricCard> {
   }
 
   String _readValue() {
-    return _metricValue(widget.metric, widget.connection.snapshot);
+    return widget.metric.formatValue(widget.connection.snapshot);
   }
 
   @override
@@ -263,9 +216,7 @@ class _MetricCardState extends State<_MetricCard> {
 
     final nextValue = _readValue();
 
-    if (nextValue == _value) {
-      return;
-    }
+    if (nextValue == _value) return;
 
     setState(() {
       _value = nextValue;
@@ -275,6 +226,7 @@ class _MetricCardState extends State<_MetricCard> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final value = _value;
 
     return RepaintBoundary(
       child: Card(
@@ -285,7 +237,7 @@ class _MetricCardState extends State<_MetricCard> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Icon(
-                _metricIcon(widget.metric),
+                widget.metric.icon,
                 size: 22,
                 color: theme.colorScheme.primary,
               ),
@@ -293,7 +245,7 @@ class _MetricCardState extends State<_MetricCard> {
               const SizedBox(height: 10),
 
               Text(
-                _metricTitle(widget.metric),
+                widget.metric.title,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.labelMedium,
@@ -309,20 +261,18 @@ class _MetricCardState extends State<_MetricCard> {
                       alignment: Alignment.centerLeft,
                       fit: BoxFit.scaleDown,
                       child: Text(
-                        _value,
+                        value,
                         maxLines: 1,
                         style: theme.textTheme.headlineSmall,
                       ),
                     ),
                   ),
 
-                  if (_metricUnit(widget.metric).isNotEmpty) ...[
+                  if (value != TelemetryFormat.unavailable &&
+                      widget.metric.unit.isNotEmpty) ...[
                     const SizedBox(width: 5),
 
-                    Text(
-                      _metricUnit(widget.metric),
-                      style: theme.textTheme.labelSmall,
-                    ),
+                    Text(widget.metric.unit, style: theme.textTheme.labelSmall),
                   ],
                 ],
               ),
@@ -342,7 +292,7 @@ class _MetricCardState extends State<_MetricCard> {
 }
 
 // ============================================
-// ADDITIONAL METRICS CARD
+// ADDITIONAL METRICS
 // ============================================
 
 class _AdditionalMetricsCard extends StatefulWidget {
@@ -371,9 +321,36 @@ class _AdditionalMetricsCardState extends State<_AdditionalMetricsCard> {
   void initState() {
     super.initState();
 
-    _values = _buildValues(widget.connection.snapshot);
+    _values = _readValues();
 
     widget.connection.addListener(_onTelemetryChanged);
+  }
+
+  List<String> _readValues() {
+    final snapshot = widget.connection.snapshot;
+
+    if (snapshot == null) {
+      return List<String>.filled(_labels.length, TelemetryFormat.unavailable);
+    }
+
+    return [
+      TelemetryFormat.onOff(snapshot.engineOn),
+
+      TelemetryFormat.distance(snapshot.odometerKm),
+
+      TelemetryFormat.rpm(snapshot.maxRpm),
+
+      TelemetryFormat.fuelTank(
+        snapshot.fuelLiters,
+        snapshot.fuelCapacityLiters,
+      ),
+
+      TelemetryFormat.cruiseControl(snapshot.cruiseControlKmh),
+
+      TelemetryFormat.speedLimit(snapshot.speedLimitKmh),
+
+      TelemetryFormat.onOff(snapshot.parkBrake, enabled: 'Активен'),
+    ];
   }
 
   @override
@@ -386,56 +363,13 @@ class _AdditionalMetricsCardState extends State<_AdditionalMetricsCard> {
       widget.connection.addListener(_onTelemetryChanged);
     }
 
-    _values = _buildValues(widget.connection.snapshot);
+    _values = _readValues();
   }
-
-  // ==========================================
-  // FORMAT VALUES
-  // ==========================================
-
-  List<String> _buildValues(TruckSnapshot? snapshot) {
-    if (snapshot == null) {
-      return List<String>.filled(_labels.length, '—');
-    }
-
-    return [
-      snapshot.engineOn ? 'Включён' : 'Выключен',
-
-      snapshot.odometerKm == null
-          ? '—'
-          : '${snapshot.odometerKm!.toStringAsFixed(1)} км',
-
-      snapshot.maxRpm == null
-          ? '—'
-          : '${snapshot.maxRpm!.toStringAsFixed(0)} RPM',
-
-      '${snapshot.fuelLiters.toStringAsFixed(1)} / '
-          '${snapshot.fuelCapacityLiters.toStringAsFixed(0)} л',
-
-      snapshot.cruiseControlKmh == null
-          ? '—'
-          : '${snapshot.cruiseControlKmh!.toStringAsFixed(0)} км/ч',
-
-      snapshot.speedLimitKmh == null
-          ? '—'
-          : '${snapshot.speedLimitKmh!.toStringAsFixed(0)} км/ч',
-
-      snapshot.parkBrake == null
-          ? '—'
-          : snapshot.parkBrake!
-          ? 'Активен'
-          : 'Выключен',
-    ];
-  }
-
-  // ==========================================
-  // UPDATE ONLY WHEN NEEDED
-  // ==========================================
 
   void _onTelemetryChanged() {
     if (!mounted) return;
 
-    final nextValues = _buildValues(widget.connection.snapshot);
+    final nextValues = _readValues();
 
     if (listEquals(_values, nextValues)) {
       return;
@@ -445,10 +379,6 @@ class _AdditionalMetricsCardState extends State<_AdditionalMetricsCard> {
       _values = nextValues;
     });
   }
-
-  // ==========================================
-  // BUILD
-  // ==========================================
 
   @override
   Widget build(BuildContext context) {
@@ -480,7 +410,7 @@ class _AdditionalMetricsCardState extends State<_AdditionalMetricsCard> {
 }
 
 // ============================================
-// REUSABLE INFORMATION ROW
+// REUSABLE DETAIL ROW
 // ============================================
 
 class _MetricInfoRow extends StatelessWidget {
