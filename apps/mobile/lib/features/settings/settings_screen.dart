@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/network/telemetry_connection.dart';
 import 'connection_settings_screen.dart';
+import 'navigation_settings_screen.dart';
 
 // ============================================
 // TRUCKLINK SETTINGS
@@ -12,6 +13,10 @@ class SettingsScreen extends StatelessWidget {
 
   final TelemetryConnection connection;
 
+  // ==========================================
+  // CONNECTION SETTINGS
+  // ==========================================
+
   void _openConnectionSettings(BuildContext context) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -20,64 +25,106 @@ class SettingsScreen extends StatelessWidget {
     );
   }
 
+  // ==========================================
+  // NAVIGATION SETTINGS
+  // ==========================================
+
+  Future<void> _openNavigationSettings(BuildContext context) async {
+    final saved = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(builder: (_) => const NavigationSettingsScreen()),
+    );
+
+    if (!context.mounted) return;
+
+    if (saved == true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Расположение разделов сохранено. '
+            'Применение к нижней панели '
+            'подключим следующим шагом.',
+          ),
+        ),
+      );
+    }
+  }
+
+  // ==========================================
+  // BUILD
+  // ==========================================
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Настройки')),
+
       body: ListView(
         key: const PageStorageKey<String>('trucklink-settings'),
         physics: const ClampingScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
         children: [
           // ==================================
-          // ACTIVE CONNECTION SETTINGS
+          // CONNECTION
           // ==================================
           _SettingsSection(
             icon: Icons.wifi_outlined,
             title: 'Подключение',
             description:
                 'Состояние Windows Hub, IP компьютера, '
-                'отключение, смена ПК и переподключение.',
+                'отключение, смена ПК '
+                'и переподключение.',
             active: true,
-            onTap: () => _openConnectionSettings(context),
+            onTap: () {
+              _openConnectionSettings(context);
+            },
           ),
 
-          const SizedBox(height: 12),
-
           // ==================================
-          // FUTURE SETTINGS
+          // APPEARANCE
           // ==================================
           const _SettingsSection(
             icon: Icons.palette_outlined,
             title: 'Оформление',
             description:
-                'Тёмная, светлая и системная темы, '
-                'цвета, градиенты и внешний '
-                'вид карточек.',
+                'Темы, акцентные цвета, градиенты '
+                'и внешний вид карточек.',
           ),
 
+          // ==================================
+          // HOME DASHBOARD
+          // ==================================
           const _SettingsSection(
             icon: Icons.dashboard_customize_outlined,
             title: 'Главная панель',
             description:
-                'Управление персональной '
-                'панелью телеметрии.',
+                'Управление персональной панелью '
+                'телеметрии.',
           ),
 
-          const _SettingsSection(
+          // ==================================
+          // NAVIGATION
+          // ==================================
+          _SettingsSection(
             icon: Icons.tab_outlined,
             title: 'Навигация',
             description:
-                'Закрепление, скрытие, перестановка '
-                'и объединение разделов.',
+                'Перестановка вкладок, закрепление, '
+                'скрытие и настройка меню «Ещё».',
+            active: true,
+            onTap: () {
+              _openNavigationSettings(context);
+            },
           ),
 
+          // ==================================
+          // TELEMETRY
+          // ==================================
           const _SettingsSection(
             icon: Icons.tune_outlined,
             title: 'Телеметрия',
             description:
-                'Включение и отключение показателей, '
-                'формат чисел и частота обновления.',
+                'Настройки отображения показателей '
+                'и единиц измерения.',
           ),
         ],
       ),
@@ -165,6 +212,7 @@ class _SettingsSection extends StatelessWidget {
 
                 if (active) ...[
                   const SizedBox(width: 8),
+
                   Icon(Icons.chevron_right_rounded, color: scheme.primary),
                 ],
               ],
