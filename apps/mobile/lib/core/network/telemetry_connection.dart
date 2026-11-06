@@ -4,7 +4,10 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:network_protocol/network_protocol.dart';
 import 'package:telemetry_core/telemetry_core.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
+
+// ============================================
+// CONNECTION STATUS
+// ============================================
 
 enum TelemetryConnectionStatus {
   disconnected,
@@ -15,12 +18,21 @@ enum TelemetryConnectionStatus {
   error,
 }
 
-/// Manages the connection between TruckLink Mobile
-/// and the Windows telemetry hub.
+// ============================================
+// TELEMETRY CONNECTION
+// ============================================
+
+/// Shared connection to TruckLink Windows Hub.
 ///
-/// Networking is independent of the widget tree.
-/// Screens can subscribe to this controller without
-/// managing WebSocket connections themselves.
+/// Uses native dart:io WebSocket on Android/iOS.
+///
+/// Features:
+/// - Bounded connection attempts
+/// - Fast cleanup without awaiting socket closure
+/// - Protection against outdated connection attempts
+/// - WebSocket ping/pong monitoring
+/// - Telemetry freshness watchdog
+/// - Throttled UI notifications
 class TelemetryConnection extends ChangeNotifier {
   TelemetryConnection() {
     _watchdog = Timer.periodic(
@@ -29,21 +41,45 @@ class TelemetryConnection extends ChangeNotifier {
     );
   }
 
+  // ==========================================
+  // CONFIGURATION
+  // ==========================================
+
   static const int serverPort = 8787;
 
+  /// Limit for establishing the TCP connection.
+  static const Duration tcpTimeout = Duration(seconds: 4);
+
+  /// Overall limit, including the WebSocket
+  /// handshake after TCP connection.
   static const Duration connectionTimeout = Duration(seconds: 5);
 
+  /// How long telemetry may remain unchanged.
   static const Duration telemetryTimeout = Duration(seconds: 4);
 
-  // Maximum frequency of notifications to the UI.
-  // Incoming packets can arrive more frequently.
+  /// Check that the Windows Hub is still alive.
+  static const Duration pingInterval = Duration(seconds: 10);
+
+  /// At most ten UI updates per second.
   static const Duration uiUpdateInterval = Duration(milliseconds: 100);
 
-  WebSocketChannel? _channel;
+  // ==========================================
+  // NETWORK STATE
+  // ==========================================
+
+  HttpClient? _httpClient;
+  WebSocket? _socket;
   StreamSubscription<dynamic>? _subscription;
 
   Timer? _watchdog;
   Timer? _updateTimer;
+
+  int _generation = 0;
+  bool _disposed = false;
+
+  // ==========================================
+  // TELEMETRY STATE
+  // ==========================================
 
   TruckSnapshot? _snapshot;
   TruckSnapshot? _pendingSnapshot;
@@ -55,11 +91,8 @@ class TelemetryConnection extends ChangeNotifier {
   String _statusMessage = 'Нет подключения к ПК';
   String? _host;
 
-  int _generation = 0;
-  bool _disposed = false;
-
   // ==========================================
-  // PUBLIC STATE
+  // PUBLIC GETTERS
   // ==========================================
 
   TruckSnapshot? get snapshot => _snapshot;
@@ -72,6 +105,8 @@ class TelemetryConnection extends ChangeNotifier {
 
   DateTime? get lastReceivedAt => _lastReceivedAt;
 
+  /// WebSocket is connected, even if ETS2 is
+  /// not currently producing telemetry.
   bool get isConnected {
     return _status == TelemetryConnectionStatus.waiting ||
         _status == TelemetryConnectionStatus.connected ||
@@ -87,109 +122,217 @@ class TelemetryConnection extends ChangeNotifier {
   // ==========================================
 
   Future<void> connect(String host) async {
-    final address = InternetAddress.tryParse(host.trim());
+    if (_disposed) return;
+
+    final cleanHost = host.trim();
+
+    // Every attempt gets its own generation ID.
+    // Old connection callbacks cannot affect
+    // the currently active attempt.
+    final generation = ++_generation;
+
+    // Important: cleanup is synchronous.
+    // We do not wait for a pending socket to close.
+    _stopTransport();
+    _clearTelemetry();
+
+    _host = null;
+
+    // ========================================
+    // VALIDATE HOST
+    // ========================================
+
+    final address = InternetAddress.tryParse(cleanHost);
 
     if (address == null || address.type != InternetAddressType.IPv4) {
       _setStatus(
         TelemetryConnectionStatus.error,
-        'Введите корректный IPv4-адрес ПК',
+        'Введите корректный IPv4-адрес компьютера',
       );
       return;
     }
 
-    final generation = ++_generation;
-
-    await _closeCurrentConnection();
-
-    if (!_isCurrent(generation)) return;
-
-    _clearTelemetry();
+    // ========================================
+    // START CONNECTION
+    // ========================================
 
     _setStatus(
       TelemetryConnectionStatus.connecting,
-      'Подключение к Windows Hub...',
+      'Подключение к $cleanHost:$serverPort...',
     );
 
-    WebSocketChannel? channel;
+    final client = HttpClient()..connectionTimeout = tcpTimeout;
+
+    _httpClient = client;
+
+    var acceptSocket = true;
+
+    final uri = Uri(scheme: 'ws', host: cleanHost, port: serverPort);
 
     try {
-      channel = WebSocketChannel.connect(
-        Uri(scheme: 'ws', host: host.trim(), port: serverPort),
+      // Start a real WebSocket connection.
+      //
+      // The custom HttpClient controls TCP timeout.
+      // Future.timeout controls the overall handshake.
+      final attempt = WebSocket.connect(uri.toString(), customClient: client);
+
+      // If a timed-out or cancelled attempt finishes
+      // later, immediately close its socket.
+      //
+      // This prevents old attempts from leaving
+      // orphaned connections behind.
+      attempt
+          .then<void>(
+            (lateSocket) {
+              if (!acceptSocket ||
+                  !_isCurrent(generation) ||
+                  !identical(_httpClient, client)) {
+                lateSocket.close().ignore();
+              }
+            },
+            onError: (Object error, StackTrace stackTrace) {
+              // The main connection attempt handles errors.
+            },
+          )
+          .ignore();
+
+      final socket = await attempt.timeout(
+        connectionTimeout,
+        onTimeout: () {
+          acceptSocket = false;
+
+          // Abort the underlying TCP/HTTP operation.
+          client.close(force: true);
+
+          throw TimeoutException('Windows Hub connection timed out');
+        },
       );
 
-      _channel = channel;
-
-      await channel.ready.timeout(connectionTimeout);
+      // ======================================
+      // CHECK WHETHER ATTEMPT IS STILL VALID
+      // ======================================
 
       if (!_isCurrent(generation)) {
-        await channel.sink.close();
+        acceptSocket = false;
+        socket.close().ignore();
         return;
       }
 
-      _host = host.trim();
+      // Enable ping/pong to detect a broken link.
+      socket.pingInterval = pingInterval;
 
-      _setStatus(
-        TelemetryConnectionStatus.waiting,
-        'Подключено. Ожидание данных ETS2...',
-      );
+      _socket = socket;
+      _host = cleanHost;
 
-      _subscription = channel.stream.listen(
-        (message) {
+      // ======================================
+      // LISTEN FOR TELEMETRY
+      // ======================================
+
+      _subscription = socket.listen(
+        (dynamic message) {
           if (_isCurrent(generation)) {
-            _handleMessage(message);
+            _handleMessage(generation, message);
           }
         },
         onDone: () {
           _handleConnectionLost(generation, 'Соединение с Windows Hub закрыто');
         },
         onError: (Object error) {
-          _handleConnectionLost(generation, 'Ошибка соединения: $error');
+          _handleConnectionLost(
+            generation,
+            'Соединение с Windows Hub потеряно',
+          );
         },
         cancelOnError: true,
       );
+
+      // Connection is established.
+      //
+      // Waiting for ETS2 does NOT mean the
+      // WebSocket connection has failed.
+      _setStatus(
+        TelemetryConnectionStatus.waiting,
+        'Подключено. Ожидание телеметрии ETS2...',
+      );
     } catch (error) {
-      if (!_isCurrent(generation)) return;
+      acceptSocket = false;
 
-      await _closeCurrentConnection();
+      if (!_isCurrent(generation)) {
+        return;
+      }
 
-      if (!_isCurrent(generation)) return;
+      // ======================================
+      // FAIL FAST
+      // ======================================
 
+      // Do not await socket closure here.
+      // It was the cause of long/hung attempts.
+      _stopTransport();
       _clearTelemetry();
+
+      _host = null;
 
       _setStatus(
         TelemetryConnectionStatus.error,
-        'Не удалось подключиться: $error',
+        _connectionErrorMessage(error, cleanHost),
       );
     }
+  }
+
+  // ==========================================
+  // HUMAN-READABLE CONNECTION ERRORS
+  // ==========================================
+
+  String _connectionErrorMessage(Object error, String host) {
+    if (error is TimeoutException) {
+      return 'ПК не ответил за '
+          '${connectionTimeout.inSeconds} секунд. '
+          'Проверь IP-адрес и Windows Hub.';
+    }
+
+    if (error is SocketException) {
+      return 'Не удалось подключиться к '
+          '$host:$serverPort. '
+          'Проверь адрес ПК и запущен ли сервер.';
+    }
+
+    if (error is WebSocketException || error is HttpException) {
+      return 'Сервер $host:$serverPort '
+          'не принял WebSocket-подключение.';
+    }
+
+    return 'Ошибка подключения: $error';
   }
 
   // ==========================================
   // RECEIVE TELEMETRY
   // ==========================================
 
-  void _handleMessage(dynamic message) {
+  void _handleMessage(int generation, dynamic message) {
     try {
       if (message is! String) {
         throw const FormatException('Expected text telemetry message');
       }
 
-      final snapshot = decodeSnapshot(message);
+      final nextSnapshot = decodeSnapshot(message);
 
-      // Keep only the latest telemetry frame.
-      // Intermediate frames are not needed for
-      // displaying the current truck state.
-      _pendingSnapshot = snapshot;
+      // Only keep the most recent frame.
+      _pendingSnapshot = nextSnapshot;
       _lastReceivedAt = DateTime.now();
 
-      if (_updateTimer == null) {
-        _updateTimer = Timer(uiUpdateInterval, _publishPendingSnapshot);
-      }
+      // Avoid notifying the entire UI for
+      // every WebSocket packet.
+      _updateTimer ??= Timer(uiUpdateInterval, _publishPendingSnapshot);
     } catch (error) {
-      _clearTelemetry();
-
-      _setStatus(TelemetryConnectionStatus.error, 'Ошибка данных: $error');
+      // Invalid protocol data means this connection
+      // is not suitable for TruckLink.
+      _handleConnectionLost(generation, 'Ошибка формата телеметрии: $error');
     }
   }
+
+  // ==========================================
+  // PUBLISH LATEST FRAME
+  // ==========================================
 
   void _publishPendingSnapshot() {
     _updateTimer = null;
@@ -197,6 +340,7 @@ class TelemetryConnection extends ChangeNotifier {
     if (_disposed) return;
 
     final pending = _pendingSnapshot;
+
     if (pending == null) return;
 
     _pendingSnapshot = null;
@@ -209,7 +353,7 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // WATCHDOG
+  // TELEMETRY WATCHDOG
   // ==========================================
 
   void _checkFreshness() {
@@ -239,28 +383,29 @@ class TelemetryConnection extends ChangeNotifier {
   void _handleConnectionLost(int generation, String message) {
     if (!_isCurrent(generation)) return;
 
-    _generation++;
+    // Invalidate callbacks belonging to this socket.
+    ++_generation;
 
-    unawaited(_closeCurrentConnection());
-
+    _stopTransport();
     _clearTelemetry();
+
     _host = null;
 
     _setStatus(TelemetryConnectionStatus.error, message);
   }
 
   // ==========================================
-  // DISCONNECT
+  // MANUAL DISCONNECT
   // ==========================================
 
   Future<void> disconnect() async {
-    ++_generation;
-
-    await _closeCurrentConnection();
-
     if (_disposed) return;
 
+    ++_generation;
+
+    _stopTransport();
     _clearTelemetry();
+
     _host = null;
 
     _setStatus(
@@ -269,28 +414,36 @@ class TelemetryConnection extends ChangeNotifier {
     );
   }
 
-  Future<void> _closeCurrentConnection() async {
+  // ==========================================
+  // FAST TRANSPORT CLEANUP
+  // ==========================================
+
+  /// Releases network resources without blocking
+  /// navigation or another connection attempt.
+  ///
+  /// Important: do not await subscription.cancel()
+  /// or socket.close() while connecting.
+  void _stopTransport() {
     final subscription = _subscription;
-    final channel = _channel;
+    final socket = _socket;
+    final client = _httpClient;
 
     _subscription = null;
-    _channel = null;
+    _socket = null;
+    _httpClient = null;
 
-    try {
-      await subscription?.cancel();
-    } catch (_) {
-      // Already closed.
-    }
+    // Asynchronous cleanup must never keep the
+    // UI in the connecting state indefinitely.
+    subscription?.cancel().ignore();
 
-    try {
-      await channel?.sink.close();
-    } catch (_) {
-      // Already closed.
-    }
+    socket?.close().ignore();
+
+    // Force-close pending connection attempts.
+    client?.close(force: true);
   }
 
   // ==========================================
-  // STATE HELPERS
+  // TELEMETRY CLEANUP
   // ==========================================
 
   void _clearTelemetry() {
@@ -301,6 +454,10 @@ class TelemetryConnection extends ChangeNotifier {
     _pendingSnapshot = null;
     _lastReceivedAt = null;
   }
+
+  // ==========================================
+  // STATUS HELPERS
+  // ==========================================
 
   void _setStatus(TelemetryConnectionStatus status, String message) {
     if (_disposed) return;
@@ -331,13 +488,19 @@ class TelemetryConnection extends ChangeNotifier {
 
   @override
   void dispose() {
+    if (_disposed) return;
+
     _disposed = true;
-    _generation++;
+    ++_generation;
 
     _watchdog?.cancel();
-    _updateTimer?.cancel();
+    _watchdog = null;
 
-    unawaited(_closeCurrentConnection());
+    _updateTimer?.cancel();
+    _updateTimer = null;
+
+    _stopTransport();
+    _clearTelemetry();
 
     super.dispose();
   }
