@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import '../lib/services/scs_shared_memory.dart';
+import 'package:trucklink_desktop/services/scs_shared_memory.dart';
 
 Future<void> main() async {
   if (!Platform.isWindows) {
