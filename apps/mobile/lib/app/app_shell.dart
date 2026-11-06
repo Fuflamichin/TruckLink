@@ -38,9 +38,7 @@ class _AppShellState extends State<AppShell> {
 
   final Set<String> _visitedPages = {};
 
-  // Only the HomeScreen listens to this notifier.
-  // Toggling edit mode does not rebuild AppShell
-  // or recreate the WebSocket connection.
+  // Shared editing state for the home dashboard.
   final ValueNotifier<bool> _homeEditMode = ValueNotifier<bool>(false);
 
   @override
@@ -96,8 +94,6 @@ class _AppShellState extends State<AppShell> {
 
     final isMoreItem = widget.layout.moreItems.any((item) => item.id == id);
 
-    // Edit mode belongs to the HomeScreen.
-    // Finish editing when leaving that page.
     _homeEditMode.value = false;
 
     setState(() {
@@ -114,16 +110,22 @@ class _AppShellState extends State<AppShell> {
     _selectPage(_morePageId);
   }
 
+  // ==========================================
+  // SETTINGS
+  // ==========================================
+
   void _openSettings() {
     _homeEditMode.value = false;
 
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute<void>(builder: (_) => const SettingsScreen()));
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SettingsScreen(connection: widget.connection),
+      ),
+    );
   }
 
   // ==========================================
-  // SECTION FACTORY
+  // PAGE FACTORY
   // ==========================================
 
   Widget _buildSection(TruckLinkSection section) {
@@ -177,7 +179,7 @@ class _AppShellState extends State<AppShell> {
   }
 
   // ==========================================
-  // SHARED APP BAR
+  // APP BAR
   // ==========================================
 
   PreferredSizeWidget _buildAppBar(
@@ -203,7 +205,6 @@ class _AppShellState extends State<AppShell> {
       centerTitle: false,
       automaticallyImplyLeading: false,
       actions: [
-        // Edit action is shown only on Home.
         if (isHome)
           ValueListenableBuilder<bool>(
             valueListenable: _homeEditMode,
@@ -268,8 +269,7 @@ class _AppShellState extends State<AppShell> {
     return Scaffold(
       appBar: _buildAppBar(selectedItem, isMorePage),
 
-      // Visited pages remain mounted.
-      // Scroll positions and WebSocket stay intact.
+      // Keep previously opened pages mounted.
       body: IndexedStack(
         index: pageIndex < 0 ? 0 : pageIndex,
         children: [
