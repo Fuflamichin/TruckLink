@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:telemetry_core/telemetry_core.dart';
 
@@ -25,6 +26,40 @@ enum HomeMetric {
   jobReward,
   remainingDistance,
   balance,
+}
+
+// ============================================
+// NUMBER FORMATTING
+// ============================================
+
+/// Displays telemetry as whole numbers.
+///
+/// Examples:
+/// 82.7 -> 83
+/// 100.0 -> 100
+/// 0.45 -> 0
+String _wholeNumber(double? value, {String unit = ''}) {
+  if (value == null || !value.isFinite) {
+    return '—';
+  }
+
+  return '${value.round()}$unit';
+}
+
+String _formatRoute(TruckJob? job) {
+  if (job == null) return 'Нет данных';
+
+  final source = job.sourceCity;
+  final destination = job.destinationCity;
+
+  if (source == null && destination == null) {
+    return 'Нет данных';
+  }
+
+  if (source == null) return destination!;
+  if (destination == null) return source;
+
+  return '$source → $destination';
 }
 
 // ============================================
@@ -95,20 +130,31 @@ extension HomeMetricInfo on HomeMetric {
     HomeMetric.balance => 'Финансы',
   };
 
+  // ==========================================
+  // LIVE TELEMETRY VALUE
+  // ==========================================
+
   String formatValue(TruckSnapshot? snapshot) {
-    if (snapshot == null) return '—';
+    // Financial balance is not available yet.
+    if (this == HomeMetric.balance) {
+      return 'Нет данных';
+    }
+
+    if (snapshot == null) {
+      return '—';
+    }
 
     final job = snapshot.job;
 
     return switch (this) {
-      HomeMetric.speed => '${snapshot.speedKmh.abs().toStringAsFixed(1)} км/ч',
+      HomeMetric.speed => _wholeNumber(snapshot.speedKmh.abs(), unit: ' км/ч'),
 
       HomeMetric.speedLimit =>
         snapshot.speedLimitKmh == null || snapshot.speedLimitKmh! <= 0
             ? '—'
-            : '${snapshot.speedLimitKmh!.toStringAsFixed(0)} км/ч',
+            : _wholeNumber(snapshot.speedLimitKmh, unit: ' км/ч'),
 
-      HomeMetric.rpm => '${snapshot.rpm.toStringAsFixed(0)} RPM',
+      HomeMetric.rpm => _wholeNumber(snapshot.rpm, unit: ' RPM'),
 
       HomeMetric.gear =>
         snapshot.gear == 0
@@ -120,33 +166,30 @@ extension HomeMetricInfo on HomeMetric {
       HomeMetric.fuelPercent =>
         snapshot.fuelCapacityLiters <= 0
             ? '—'
-            : '${snapshot.fuelPercent.toStringAsFixed(0)}%',
+            : _wholeNumber(snapshot.fuelPercent, unit: '%'),
 
-      HomeMetric.fuelLiters => '${snapshot.fuelLiters.toStringAsFixed(1)} л',
+      HomeMetric.fuelLiters => _wholeNumber(snapshot.fuelLiters, unit: ' л'),
 
       HomeMetric.engineOn => snapshot.engineOn ? 'Включён' : 'Выключен',
 
-      HomeMetric.temperature =>
-        snapshot.waterTemperatureC == null
-            ? '—'
-            : '${snapshot.waterTemperatureC!.toStringAsFixed(0)} °C',
+      HomeMetric.temperature => _wholeNumber(
+        snapshot.waterTemperatureC,
+        unit: ' °C',
+      ),
 
-      HomeMetric.engineWear =>
-        snapshot.engineWearPercent == null
-            ? '—'
-            : '${snapshot.engineWearPercent!.toStringAsFixed(1)}%',
+      HomeMetric.engineWear => _wholeNumber(
+        snapshot.engineWearPercent,
+        unit: '%',
+      ),
 
-      HomeMetric.odometer =>
-        snapshot.odometerKm == null
-            ? '—'
-            : '${snapshot.odometerKm!.toStringAsFixed(1)} км',
+      HomeMetric.odometer => _wholeNumber(snapshot.odometerKm, unit: ' км'),
 
       HomeMetric.cruiseControl =>
         snapshot.cruiseControlKmh == null
             ? '—'
             : snapshot.cruiseControlKmh! <= 0
             ? 'Выключен'
-            : '${snapshot.cruiseControlKmh!.toStringAsFixed(0)} км/ч',
+            : _wholeNumber(snapshot.cruiseControlKmh, unit: ' км/ч'),
 
       HomeMetric.parkBrake =>
         snapshot.parkBrake == null
@@ -160,48 +203,16 @@ extension HomeMetricInfo on HomeMetric {
       HomeMetric.route => _formatRoute(job),
 
       HomeMetric.jobReward =>
-        job?.reward == null ? 'Нет данных' : '${job!.reward}',
+        job?.reward == null ? 'Нет данных' : job!.reward.toString(),
 
       HomeMetric.remainingDistance =>
         job?.remainingDistanceKm == null
             ? 'Нет данных'
-            : '${job!.remainingDistanceKm!.toStringAsFixed(1)} км',
+            : _wholeNumber(job!.remainingDistanceKm, unit: ' км'),
 
-      // Financial telemetry is not yet connected.
       HomeMetric.balance => 'Нет данных',
     };
   }
-}
-
-String _formatRoute(TruckJob? job) {
-  if (job == null) return 'Нет данных';
-
-  final source = job.sourceCity;
-  final destination = job.destinationCity;
-
-  if (source == null && destination == null) {
-    return 'Нет данных';
-  }
-
-  if (source == null) return destination!;
-  if (destination == null) return source;
-
-  return '$source → $destination';
-}
-
-// ============================================
-// HOME LAYOUT CONFIGURATION
-// ============================================
-
-class _HomeLayout {
-  _HomeLayout({
-    required List<HomeMetric> order,
-    required Set<HomeMetric> visible,
-  }) : order = List<HomeMetric>.of(order),
-       visible = Set<HomeMetric>.of(visible);
-
-  final List<HomeMetric> order;
-  final Set<HomeMetric> visible;
 }
 
 // ============================================
@@ -209,52 +220,218 @@ class _HomeLayout {
 // ============================================
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.connection});
+  const HomeScreen({
+    super.key,
+    required this.connection,
+    required this.editMode,
+  });
 
   final TelemetryConnection connection;
+
+  /// Controlled by the edit button in AppShell.
+  final ValueListenable<bool> editMode;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final List<HomeMetric> _order = List<HomeMetric>.of(HomeMetric.values);
-
-  final Set<HomeMetric> _visible = {
+  // Only visible metrics are stored here.
+  // Their order is also their display order.
+  final List<HomeMetric> _metrics = [
     HomeMetric.speed,
     HomeMetric.speedLimit,
     HomeMetric.cargo,
     HomeMetric.balance,
-  };
+  ];
 
-  List<HomeMetric> get _visibleMetrics {
-    return _order.where(_visible.contains).toList(growable: false);
+  // ==========================================
+  // REMOVE METRIC
+  // ==========================================
+
+  void _removeMetric(HomeMetric metric) {
+    setState(() {
+      _metrics.remove(metric);
+    });
   }
 
   // ==========================================
-  // OPEN CUSTOMIZATION
+  // MOVE METRIC
   // ==========================================
 
-  Future<void> _customize() async {
-    final result = await Navigator.of(context).push<_HomeLayout>(
-      MaterialPageRoute<_HomeLayout>(
-        builder: (_) => _CustomizeHomeScreen(
-          initialLayout: _HomeLayout(order: _order, visible: _visible),
-        ),
-      ),
-    );
+  void _moveMetric(HomeMetric source, HomeMetric destination) {
+    if (source == destination) return;
 
-    if (!mounted || result == null) return;
+    final sourceIndex = _metrics.indexOf(source);
+    final destinationIndex = _metrics.indexOf(destination);
+
+    if (sourceIndex < 0 || destinationIndex < 0) {
+      return;
+    }
 
     setState(() {
-      _order
-        ..clear()
-        ..addAll(result.order);
-
-      _visible
-        ..clear()
-        ..addAll(result.visible);
+      final item = _metrics.removeAt(sourceIndex);
+      _metrics.insert(destinationIndex, item);
     });
+  }
+
+  // ==========================================
+  // ADD METRICS BOTTOM SHEET
+  // ==========================================
+
+  Future<void> _showAddMetrics() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (sheetContext, setSheetState) {
+            final available = HomeMetric.values
+                .where((metric) => !_metrics.contains(metric))
+                .toList(growable: false);
+
+            return SizedBox(
+              height: MediaQuery.sizeOf(sheetContext).height * 0.72,
+              child: Column(
+                children: [
+                  // ==========================
+                  // SHEET HEADER
+                  // ==========================
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Добавить показатели',
+                                style: Theme.of(
+                                  sheetContext,
+                                ).textTheme.titleLarge,
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                'Выбери нужные карточки '
+                                'для главной панели',
+                                style: Theme.of(
+                                  sheetContext,
+                                ).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Закрыть',
+                          onPressed: () {
+                            Navigator.of(sheetContext).pop();
+                          },
+                          icon: const Icon(Icons.close_rounded),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const Divider(height: 1),
+
+                  // ==========================
+                  // AVAILABLE METRICS
+                  // ==========================
+                  Expanded(
+                    child: available.isEmpty
+                        ? Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(24),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.check_circle_outline,
+                                    size: 52,
+                                    color: Theme.of(
+                                      sheetContext,
+                                    ).colorScheme.primary,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  const Text(
+                                    'Все показатели добавлены',
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          )
+                        : ListView.builder(
+                            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                            itemCount: available.length,
+                            itemBuilder: (context, index) {
+                              final metric = available[index];
+
+                              return Card(
+                                key: ValueKey(metric),
+                                margin: const EdgeInsets.only(bottom: 8),
+                                child: ListTile(
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                    vertical: 5,
+                                  ),
+                                  leading: Icon(
+                                    metric.icon,
+                                    color: Theme.of(
+                                      sheetContext,
+                                    ).colorScheme.primary,
+                                  ),
+                                  title: Text(metric.title),
+                                  subtitle: Text(metric.category),
+                                  trailing: const Icon(
+                                    Icons.add_circle_outline,
+                                  ),
+                                  onTap: () {
+                                    setState(() {
+                                      if (!_metrics.contains(metric)) {
+                                        _metrics.add(metric);
+                                      }
+                                    });
+
+                                    // Update the sheet without
+                                    // closing it. Multiple metrics
+                                    // can be added in one visit.
+                                    setSheetState(() {});
+                                  },
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+
+                  // ==========================
+                  // FINISH ADDING
+                  // ==========================
+                  SafeArea(
+                    top: false,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: () {
+                            Navigator.of(sheetContext).pop();
+                          },
+                          child: const Text('Готово'),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   // ==========================================
@@ -263,157 +440,321 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final metrics = _visibleMetrics;
+    return ValueListenableBuilder<bool>(
+      valueListenable: widget.editMode,
+      builder: (context, isEditing, child) {
+        final metrics = List<HomeMetric>.of(_metrics);
 
-    return CustomScrollView(
-      key: const PageStorageKey<String>('trucklink-home'),
-      physics: const ClampingScrollPhysics(),
-      slivers: [
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
-          sliver: SliverToBoxAdapter(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Мой TruckLink',
-                  style: Theme.of(context).textTheme.headlineMedium,
-                ),
+        return Column(
+          children: [
+            Expanded(
+              child: CustomScrollView(
+                key: const PageStorageKey<String>('trucklink-home'),
+                physics: const ClampingScrollPhysics(),
+                slivers: [
+                  // ============================
+                  // PAGE DESCRIPTION
+                  // ============================
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
+                    sliver: SliverToBoxAdapter(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            isEditing ? 'Редактирование' : 'Мой TruckLink',
+                            style: Theme.of(context).textTheme.headlineMedium,
+                          ),
 
-                const SizedBox(height: 6),
+                          const SizedBox(height: 7),
 
-                Text(
-                  'Персональная панель телеметрии',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
+                          Text(
+                            isEditing
+                                ? 'Удерживай карточку и '
+                                      'перетащи на место другой. '
+                                      'Нажми крестик, чтобы убрать её.'
+                                : 'Персональная панель '
+                                      'телеметрии',
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
 
-                const SizedBox(height: 18),
+                  // ============================
+                  // EMPTY HOME
+                  // ============================
+                  if (metrics.isEmpty)
+                    const SliverPadding(
+                      padding: EdgeInsets.all(16),
+                      sliver: SliverToBoxAdapter(
+                        child: Card(
+                          child: Padding(
+                            padding: EdgeInsets.all(24),
+                            child: Column(
+                              children: [
+                                Icon(Icons.dashboard_outlined, size: 44),
+                                SizedBox(height: 12),
+                                Text(
+                                  'Нет выбранных карточек',
+                                  textAlign: TextAlign.center,
+                                ),
+                                SizedBox(height: 8),
+                                Text(
+                                  'Добавь показатели, '
+                                  'чтобы они появились '
+                                  'на главной странице.',
+                                  textAlign: TextAlign.center,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    )
+                  else
+                    SliverPadding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      sliver: SliverLayoutBuilder(
+                        builder: (context, constraints) {
+                          final columns = constraints.crossAxisExtent < 280
+                              ? 1
+                              : 2;
 
-                OutlinedButton.icon(
-                  onPressed: _customize,
-                  icon: const Icon(Icons.dashboard_customize_outlined),
-                  label: const Text('Настроить главную'),
-                ),
-              ],
+                          return SliverGrid(
+                            gridDelegate:
+                                SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: columns,
+                                  mainAxisExtent: 158,
+                                  mainAxisSpacing: 10,
+                                  crossAxisSpacing: 10,
+                                ),
+                            delegate: SliverChildBuilderDelegate(
+                              (context, index) {
+                                final metric = metrics[index];
+
+                                return _HomeGridItem(
+                                  key: ValueKey(metric),
+                                  metric: metric,
+                                  connection: widget.connection,
+                                  isEditing: isEditing,
+                                  onRemove: () {
+                                    _removeMetric(metric);
+                                  },
+                                  onMove: _moveMetric,
+                                );
+                              },
+                              childCount: metrics.length,
+                              findChildIndexCallback: (key) {
+                                if (key is ValueKey<HomeMetric>) {
+                                  final index = metrics.indexOf(key.value);
+
+                                  return index < 0 ? null : index;
+                                }
+
+                                return null;
+                              },
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+
+                  const SliverToBoxAdapter(child: SizedBox(height: 32)),
+                ],
+              ),
             ),
-          ),
-        ),
 
-        if (metrics.isEmpty)
-          const SliverPadding(
-            padding: EdgeInsets.all(16),
-            sliver: SliverToBoxAdapter(
-              child: Card(
-                child: Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Column(
-                    children: [
-                      Icon(Icons.dashboard_outlined, size: 44),
-                      SizedBox(height: 12),
-                      Text(
-                        'Нет выбранных карточек',
-                        textAlign: TextAlign.center,
-                      ),
-                      SizedBox(height: 8),
-                      Text(
-                        'Нажми «Настроить главную», '
-                        'чтобы добавить показатели.',
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
+            // ================================
+            // EDIT MODE BOTTOM ACTION
+            // ================================
+            if (isEditing)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _showAddMetrics,
+                    icon: const Icon(Icons.add_rounded),
+                    label: const Text('Добавить показатели'),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(52),
+                    ),
                   ),
                 ),
               ),
-            ),
-          )
-        else
-          SliverPadding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            sliver: SliverLayoutBuilder(
-              builder: (context, constraints) {
-                final columns = constraints.crossAxisExtent < 280 ? 1 : 2;
-
-                return SliverGrid(
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: columns,
-                    mainAxisExtent: 158,
-                    mainAxisSpacing: 10,
-                    crossAxisSpacing: 10,
-                  ),
-                  delegate: SliverChildBuilderDelegate(
-                    (context, index) {
-                      final metric = metrics[index];
-
-                      return _HomeMetricCard(
-                        key: ValueKey(metric),
-                        metric: metric,
-                        connection: widget.connection,
-                      );
-                    },
-                    childCount: metrics.length,
-                    findChildIndexCallback: (key) {
-                      if (key is ValueKey<HomeMetric>) {
-                        final index = metrics.indexOf(key.value);
-
-                        return index < 0 ? null : index;
-                      }
-
-                      return null;
-                    },
-                  ),
-                );
-              },
-            ),
-          ),
-
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(16, 20, 16, 32),
-          sliver: SliverToBoxAdapter(
-            child: Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      Icons.info_outline,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-
-                    const SizedBox(width: 12),
-
-                    const Expanded(
-                      child: Text(
-                        'Карточки используют доступные '
-                        'данные ETS2/ATS. Для заказов '
-                        'и финансов некоторые показатели '
-                        'пока могут быть недоступны.',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
+          ],
+        );
+      },
     );
   }
 }
 
 // ============================================
-// OPTIMIZED HOME METRIC CARD
+// GRID ITEM / DRAG & DROP
 // ============================================
 
-class _HomeMetricCard extends StatefulWidget {
-  const _HomeMetricCard({
+class _HomeGridItem extends StatelessWidget {
+  const _HomeGridItem({
     super.key,
     required this.metric,
     required this.connection,
+    required this.isEditing,
+    required this.onRemove,
+    required this.onMove,
   });
 
   final HomeMetric metric;
   final TelemetryConnection connection;
+  final bool isEditing;
+  final VoidCallback onRemove;
+
+  final void Function(HomeMetric source, HomeMetric destination) onMove;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isEditing) {
+      return _HomeMetricCard(
+        metric: metric,
+        connection: connection,
+        isEditing: false,
+      );
+    }
+
+    final scheme = Theme.of(context).colorScheme;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return DragTarget<HomeMetric>(
+          onWillAcceptWithDetails: (details) {
+            return details.data != metric;
+          },
+
+          onAcceptWithDetails: (details) {
+            onMove(details.data, metric);
+          },
+
+          builder: (context, candidateData, rejectedData) {
+            final highlighted = candidateData.isNotEmpty;
+
+            return AnimatedContainer(
+              duration: const Duration(milliseconds: 140),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(
+                  width: highlighted ? 2 : 0,
+                  color: highlighted ? scheme.primary : Colors.transparent,
+                ),
+              ),
+
+              // Long press enables dragging while
+              // normal vertical swipes still scroll.
+              child: LongPressDraggable<HomeMetric>(
+                data: metric,
+                maxSimultaneousDrags: 1,
+
+                feedback: Material(
+                  color: Colors.transparent,
+                  child: SizedBox(
+                    width: constraints.maxWidth,
+                    height: 158,
+                    child: _DraggingPreview(
+                      metric: metric,
+                      value: metric.formatValue(connection.snapshot),
+                    ),
+                  ),
+                ),
+
+                childWhenDragging: Container(
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainer,
+                    borderRadius: BorderRadius.circular(22),
+                    border: Border.all(color: scheme.outlineVariant),
+                  ),
+                  child: Icon(
+                    Icons.open_with_rounded,
+                    color: scheme.primary,
+                    size: 32,
+                  ),
+                ),
+
+                child: _HomeMetricCard(
+                  metric: metric,
+                  connection: connection,
+                  isEditing: true,
+                  onRemove: onRemove,
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+// ============================================
+// DRAGGING PREVIEW
+// ============================================
+
+class _DraggingPreview extends StatelessWidget {
+  const _DraggingPreview({required this.metric, required this.value});
+
+  final HomeMetric metric;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
+    return Card(
+      margin: EdgeInsets.zero,
+      elevation: 10,
+      color: scheme.surfaceContainerHigh,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(22),
+        side: BorderSide(color: scheme.primary, width: 2),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(metric.icon, color: scheme.primary),
+            const SizedBox(height: 12),
+            Text(metric.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+            const Spacer(),
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================
+// LIVE TELEMETRY CARD
+// ============================================
+
+class _HomeMetricCard extends StatefulWidget {
+  const _HomeMetricCard({
+    required this.metric,
+    required this.connection,
+    required this.isEditing,
+    this.onRemove,
+  });
+
+  final HomeMetric metric;
+  final TelemetryConnection connection;
+  final bool isEditing;
+  final VoidCallback? onRemove;
 
   @override
   State<_HomeMetricCard> createState() => _HomeMetricCardState();
@@ -461,7 +802,8 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
 
     return RepaintBoundary(
       child: Card(
@@ -477,37 +819,69 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
 
                   const Spacer(),
 
-                  Flexible(
-                    child: Text(
-                      widget.metric.category,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
+                  if (widget.isEditing)
+                    IconButton(
+                      tooltip: 'Убрать показатель',
+                      onPressed: widget.onRemove,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: 34,
+                        minHeight: 34,
+                      ),
+                      icon: Icon(
+                        Icons.close_rounded,
+                        color: scheme.error,
+                        size: 23,
+                      ),
+                    )
+                  else
+                    Flexible(
+                      child: Text(
+                        widget.metric.category,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
                       ),
                     ),
-                  ),
                 ],
               ),
 
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
 
               Text(
                 widget.metric.title,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.labelMedium,
+                style: theme.textTheme.labelMedium,
               ),
 
               const Spacer(),
 
-              Text(
-                _value,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(
-                  context,
-                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _value,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+
+                  if (widget.isEditing)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 4),
+                      child: Icon(
+                        Icons.drag_indicator_rounded,
+                        color: scheme.onSurfaceVariant,
+                        size: 20,
+                      ),
+                    ),
+                ],
               ),
             ],
           ),
@@ -519,216 +893,6 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
   @override
   void dispose() {
     widget.connection.removeListener(_onUpdate);
-
     super.dispose();
-  }
-}
-
-// ============================================
-// HOME CUSTOMIZATION SCREEN
-// ============================================
-
-class _CustomizeHomeScreen extends StatefulWidget {
-  const _CustomizeHomeScreen({required this.initialLayout});
-
-  final _HomeLayout initialLayout;
-
-  @override
-  State<_CustomizeHomeScreen> createState() => _CustomizeHomeScreenState();
-}
-
-class _CustomizeHomeScreenState extends State<_CustomizeHomeScreen> {
-  late List<HomeMetric> _order;
-  late Set<HomeMetric> _visible;
-
-  @override
-  void initState() {
-    super.initState();
-
-    _order = List<HomeMetric>.of(widget.initialLayout.order);
-
-    _visible = Set<HomeMetric>.of(widget.initialLayout.visible);
-  }
-
-  // ==========================================
-  // REORDER
-  // ==========================================
-
-  void _reorder(int oldIndex, int newIndex) {
-    setState(() {
-      if (newIndex > oldIndex) {
-        newIndex--;
-      }
-
-      final item = _order.removeAt(oldIndex);
-      _order.insert(newIndex, item);
-    });
-  }
-
-  // ==========================================
-  // TOGGLE
-  // ==========================================
-
-  void _toggle(HomeMetric metric, bool enabled) {
-    setState(() {
-      if (enabled) {
-        _visible.add(metric);
-      } else {
-        _visible.remove(metric);
-      }
-    });
-  }
-
-  // ==========================================
-  // SAVE
-  // ==========================================
-
-  void _save() {
-    Navigator.of(context).pop(_HomeLayout(order: _order, visible: _visible));
-  }
-
-  // ==========================================
-  // BUILD
-  // ==========================================
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Главная панель'),
-        actions: [
-          TextButton(onPressed: _save, child: const Text('Готово')),
-          const SizedBox(width: 8),
-        ],
-      ),
-
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Выбери показатели',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-
-                const SizedBox(height: 8),
-
-                Text(
-                  'Включай нужные карточки и '
-                  'перетаскивай их за значок справа, '
-                  'чтобы изменить порядок на главной.',
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-
-                const SizedBox(height: 14),
-
-                Text(
-                  'Выбрано: ${_visible.length} '
-                  'из ${_order.length}',
-                  style: TextStyle(
-                    color: scheme.primary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          Expanded(
-            child: ReorderableListView.builder(
-              buildDefaultDragHandles: false,
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-              itemCount: _order.length,
-              onReorder: _reorder,
-
-              itemBuilder: (context, index) {
-                final metric = _order[index];
-                final enabled = _visible.contains(metric);
-
-                return Card(
-                  key: ValueKey(metric),
-                  margin: const EdgeInsets.only(bottom: 8),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 5),
-                    child: Row(
-                      children: [
-                        const SizedBox(width: 12),
-
-                        Icon(
-                          metric.icon,
-                          color: enabled
-                              ? scheme.primary
-                              : scheme.onSurfaceVariant,
-                        ),
-
-                        const SizedBox(width: 12),
-
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                metric.title,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.titleSmall,
-                              ),
-
-                              const SizedBox(height: 3),
-
-                              Text(
-                                metric.category,
-                                style: Theme.of(context).textTheme.bodySmall,
-                              ),
-                            ],
-                          ),
-                        ),
-
-                        Switch.adaptive(
-                          value: enabled,
-                          onChanged: (value) {
-                            _toggle(metric, value);
-                          },
-                        ),
-
-                        ReorderableDragStartListener(
-                          index: index,
-                          child: const Padding(
-                            padding: EdgeInsets.all(12),
-                            child: Icon(Icons.drag_handle),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-              child: SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed: _save,
-                  icon: const Icon(Icons.check),
-                  label: const Text('Применить изменения'),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
   }
 }

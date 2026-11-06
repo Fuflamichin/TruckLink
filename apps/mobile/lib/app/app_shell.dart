@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/network/telemetry_connection.dart';
@@ -33,12 +34,14 @@ class _AppShellState extends State<AppShell> {
   static const String _morePageId = '__more__';
 
   late String _selectedId;
-
   String? _lastMoreSelection;
 
-  // Pages are created only when first visited.
-  // After that, IndexedStack preserves their state.
   final Set<String> _visitedPages = {};
+
+  // Only the HomeScreen listens to this notifier.
+  // Toggling edit mode does not rebuild AppShell
+  // or recreate the WebSocket connection.
+  final ValueNotifier<bool> _homeEditMode = ValueNotifier<bool>(false);
 
   @override
   void initState() {
@@ -93,6 +96,10 @@ class _AppShellState extends State<AppShell> {
 
     final isMoreItem = widget.layout.moreItems.any((item) => item.id == id);
 
+    // Edit mode belongs to the HomeScreen.
+    // Finish editing when leaving that page.
+    _homeEditMode.value = false;
+
     setState(() {
       _selectedId = id;
       _visitedPages.add(id);
@@ -108,6 +115,8 @@ class _AppShellState extends State<AppShell> {
   }
 
   void _openSettings() {
+    _homeEditMode.value = false;
+
     Navigator.of(
       context,
     ).push(MaterialPageRoute<void>(builder: (_) => const SettingsScreen()));
@@ -119,7 +128,10 @@ class _AppShellState extends State<AppShell> {
 
   Widget _buildSection(TruckLinkSection section) {
     return switch (section) {
-      TruckLinkSection.home => HomeScreen(connection: widget.connection),
+      TruckLinkSection.home => HomeScreen(
+        connection: widget.connection,
+        editMode: _homeEditMode,
+      ),
 
       TruckLinkSection.instruments => DashboardScreen(
         connection: widget.connection,
@@ -132,8 +144,7 @@ class _AppShellState extends State<AppShell> {
         title: 'Финансы',
         message:
             'Баланс, доходы и расходы появятся '
-            'после подключения финансовых '
-            'данных ETS2.',
+            'после подключения финансовых данных ETS2.',
       ),
 
       TruckLinkSection.job => JobScreen(connection: widget.connection),
@@ -152,8 +163,7 @@ class _AppShellState extends State<AppShell> {
         title: 'Статистика',
         message:
             'Здесь появятся история рейсов, '
-            'пробег, доходы и статистика '
-            'перевозок.',
+            'пробег, доходы и статистика перевозок.',
       ),
     };
   }
@@ -167,7 +177,7 @@ class _AppShellState extends State<AppShell> {
   }
 
   // ==========================================
-  // APP BAR
+  // SHARED APP BAR
   // ==========================================
 
   PreferredSizeWidget _buildAppBar(
@@ -175,11 +185,15 @@ class _AppShellState extends State<AppShell> {
     bool isMorePage,
   ) {
     final isInstruments =
-        selectedItem?.sections.length == 1 &&
-        selectedItem?.sections.first == TruckLinkSection.instruments;
+        selectedItem != null &&
+        selectedItem.sections.length == 1 &&
+        selectedItem.sections.first == TruckLinkSection.instruments;
 
-    // Dashboard and MoreScreen have their own
-    // large section headings inside the page.
+    final isHome =
+        selectedItem != null &&
+        selectedItem.sections.length == 1 &&
+        selectedItem.sections.first == TruckLinkSection.home;
+
     final title = isMorePage || isInstruments
         ? 'TruckLink'
         : selectedItem?.title ?? 'TruckLink';
@@ -189,11 +203,31 @@ class _AppShellState extends State<AppShell> {
       centerTitle: false,
       automaticallyImplyLeading: false,
       actions: [
+        // Edit action is shown only on Home.
+        if (isHome)
+          ValueListenableBuilder<bool>(
+            valueListenable: _homeEditMode,
+            builder: (context, isEditing, child) {
+              return IconButton(
+                tooltip: isEditing
+                    ? 'Завершить редактирование'
+                    : 'Редактировать главную',
+                icon: Icon(
+                  isEditing ? Icons.check_rounded : Icons.edit_outlined,
+                ),
+                onPressed: () {
+                  _homeEditMode.value = !isEditing;
+                },
+              );
+            },
+          ),
+
         IconButton(
           tooltip: 'Настройки TruckLink',
           onPressed: _openSettings,
           icon: const Icon(Icons.settings_outlined),
         ),
+
         const SizedBox(width: 8),
       ],
     );
@@ -234,8 +268,8 @@ class _AppShellState extends State<AppShell> {
     return Scaffold(
       appBar: _buildAppBar(selectedItem, isMorePage),
 
-      // Unvisited pages use lightweight placeholders.
-      // Visited pages stay mounted.
+      // Visited pages remain mounted.
+      // Scroll positions and WebSocket stay intact.
       body: IndexedStack(
         index: pageIndex < 0 ? 0 : pageIndex,
         children: [
@@ -270,17 +304,18 @@ class _AppShellState extends State<AppShell> {
       ),
     );
   }
+
+  @override
+  void dispose() {
+    _homeEditMode.dispose();
+    super.dispose();
+  }
 }
 
 // ============================================
-// COMBINED SECTIONS
+// COMBINED NAVIGATION GROUP
 // ============================================
 
-/// Supports future navigation groups such as
-/// "Instruments + Truck".
-///
-/// This stays small enough to live in AppShell
-/// because it is navigation-specific.
 class _CombinedSectionsPage extends StatelessWidget {
   const _CombinedSectionsPage({required this.item, required this.pageBuilder});
 
