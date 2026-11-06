@@ -1,9 +1,10 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:telemetry_core/telemetry_core.dart';
 
+import '../../core/formatting/telemetry_format.dart';
 import '../../core/network/telemetry_connection.dart';
 import 'data/home_layout_storage.dart';
 
@@ -11,6 +12,8 @@ import 'data/home_layout_storage.dart';
 // AVAILABLE HOME METRICS
 // ============================================
 
+// Keep these identifiers unchanged.
+// They are stored in shared_preferences.
 enum HomeMetric {
   speed,
   speedLimit,
@@ -32,20 +35,13 @@ enum HomeMetric {
 }
 
 // ============================================
-// NUMBER FORMATTING
+// JOB FORMATTING
 // ============================================
 
-/// Displays whole numbers without decimals.
-String _wholeNumber(double? value, {String unit = ''}) {
-  if (value == null || !value.isFinite) {
-    return '—';
-  }
-
-  return '${value.round()}$unit';
-}
-
 String _formatRoute(TruckJob? job) {
-  if (job == null) return 'Нет данных';
+  if (job == null) {
+    return 'Нет данных';
+  }
 
   final source = job.sourceCity;
   final destination = job.destinationCity;
@@ -54,17 +50,42 @@ String _formatRoute(TruckJob? job) {
     return 'Нет данных';
   }
 
-  if (source == null) return destination!;
-  if (destination == null) return source;
+  if (source == null) {
+    return destination!;
+  }
+
+  if (destination == null) {
+    return source;
+  }
 
   return '$source → $destination';
 }
 
+String _formatReward(TruckJob? job) {
+  final reward = job?.reward;
+
+  if (reward == null) {
+    return 'Нет данных';
+  }
+
+  final number = num.tryParse(reward.toString());
+
+  if (number != null) {
+    return TelemetryFormat.integer(number);
+  }
+
+  return reward.toString();
+}
+
 // ============================================
-// METRIC PRESENTATION
+// METRIC INFORMATION
 // ============================================
 
 extension HomeMetricInfo on HomeMetric {
+  // ==========================================
+  // TITLES
+  // ==========================================
+
   String get title => switch (this) {
     HomeMetric.speed => 'Скорость',
     HomeMetric.speedLimit => 'Ограничение',
@@ -85,6 +106,10 @@ extension HomeMetricInfo on HomeMetric {
     HomeMetric.balance => 'Баланс',
   };
 
+  // ==========================================
+  // ICONS
+  // ==========================================
+
   IconData get icon => switch (this) {
     HomeMetric.speed => Icons.speed,
     HomeMetric.speedLimit => Icons.signpost_outlined,
@@ -104,6 +129,10 @@ extension HomeMetricInfo on HomeMetric {
     HomeMetric.remainingDistance => Icons.route_outlined,
     HomeMetric.balance => Icons.account_balance_wallet_outlined,
   };
+
+  // ==========================================
+  // CATEGORIES
+  // ==========================================
 
   String get category => switch (this) {
     HomeMetric.speed ||
@@ -129,85 +158,88 @@ extension HomeMetricInfo on HomeMetric {
   };
 
   // ==========================================
-  // LIVE TELEMETRY VALUES
+  // LIVE TELEMETRY FORMATTING
   // ==========================================
 
   String formatValue(TruckSnapshot? snapshot) {
-    // Finance integration is not available yet.
+    // Financial telemetry is not connected yet.
     if (this == HomeMetric.balance) {
       return 'Нет данных';
     }
 
     if (snapshot == null) {
-      return '—';
+      return TelemetryFormat.unavailable;
     }
 
     final job = snapshot.job;
 
     return switch (this) {
-      HomeMetric.speed => _wholeNumber(snapshot.speedKmh.abs(), unit: ' км/ч'),
+      // Speed
+      HomeMetric.speed => TelemetryFormat.speed(snapshot.speedKmh),
 
-      HomeMetric.speedLimit =>
-        snapshot.speedLimitKmh == null || snapshot.speedLimitKmh! <= 0
-            ? '—'
-            : _wholeNumber(snapshot.speedLimitKmh, unit: ' км/ч'),
+      // Road speed limit
+      HomeMetric.speedLimit => TelemetryFormat.speedLimit(
+        snapshot.speedLimitKmh,
+      ),
 
-      HomeMetric.rpm => _wholeNumber(snapshot.rpm, unit: ' RPM'),
+      // Engine revolutions
+      HomeMetric.rpm => TelemetryFormat.rpm(snapshot.rpm),
 
-      HomeMetric.gear =>
-        snapshot.gear == 0
-            ? 'N'
-            : snapshot.gear < 0
-            ? 'R${snapshot.gear.abs()}'
-            : snapshot.gear.toString(),
+      // Current gear
+      HomeMetric.gear => TelemetryFormat.gear(snapshot.gear),
 
+      // Fuel percentage
       HomeMetric.fuelPercent =>
         snapshot.fuelCapacityLiters <= 0
-            ? '—'
-            : _wholeNumber(snapshot.fuelPercent, unit: '%'),
+            ? TelemetryFormat.unavailable
+            : TelemetryFormat.percent(snapshot.fuelPercent),
 
-      HomeMetric.fuelLiters => _wholeNumber(snapshot.fuelLiters, unit: ' л'),
+      // Liters remaining
+      HomeMetric.fuelLiters => TelemetryFormat.liters(snapshot.fuelLiters),
 
-      HomeMetric.engineOn => snapshot.engineOn ? 'Включён' : 'Выключен',
+      // Engine state
+      HomeMetric.engineOn => TelemetryFormat.onOff(snapshot.engineOn),
 
-      HomeMetric.temperature => _wholeNumber(
+      // Water temperature
+      HomeMetric.temperature => TelemetryFormat.temperature(
         snapshot.waterTemperatureC,
-        unit: ' °C',
       ),
 
-      HomeMetric.engineWear => _wholeNumber(
+      // Engine wear
+      HomeMetric.engineWear => TelemetryFormat.percent(
         snapshot.engineWearPercent,
-        unit: '%',
       ),
 
-      HomeMetric.odometer => _wholeNumber(snapshot.odometerKm, unit: ' км'),
+      // Total odometer
+      HomeMetric.odometer => TelemetryFormat.distance(snapshot.odometerKm),
 
-      HomeMetric.cruiseControl =>
-        snapshot.cruiseControlKmh == null
-            ? '—'
-            : snapshot.cruiseControlKmh! <= 0
-            ? 'Выключен'
-            : _wholeNumber(snapshot.cruiseControlKmh, unit: ' км/ч'),
+      // Cruise control
+      HomeMetric.cruiseControl => TelemetryFormat.cruiseControl(
+        snapshot.cruiseControlKmh,
+      ),
 
-      HomeMetric.parkBrake =>
-        snapshot.parkBrake == null
-            ? '—'
-            : snapshot.parkBrake!
-            ? 'Активен'
-            : 'Выключен',
+      // Parking brake
+      HomeMetric.parkBrake => TelemetryFormat.onOff(
+        snapshot.parkBrake,
+        enabled: 'Активен',
+      ),
 
+      // Job cargo
       HomeMetric.cargo => job?.cargoName ?? 'Нет данных',
 
+      // Job route
       HomeMetric.route => _formatRoute(job),
 
-      HomeMetric.jobReward =>
-        job?.reward == null ? 'Нет данных' : job!.reward.toString(),
+      // Job reward
+      HomeMetric.jobReward => _formatReward(job),
 
+      // Remaining job distance
       HomeMetric.remainingDistance =>
         job?.remainingDistanceKm == null
             ? 'Нет данных'
-            : _wholeNumber(job!.remainingDistanceKm, unit: ' км'),
+            : TelemetryFormat.distance(job!.remainingDistanceKm),
 
+      // Finance balance
       HomeMetric.balance => 'Нет данных',
     };
   }
@@ -225,6 +257,8 @@ class HomeScreen extends StatefulWidget {
   });
 
   final TelemetryConnection connection;
+
+  // Controlled by AppShell's edit button.
   final ValueListenable<bool> editMode;
 
   @override
@@ -232,11 +266,12 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // Shared storage instance keeps write ordering
-  // consistent even if this screen is recreated.
+  // ==========================================
+  // LOCAL STORAGE
+  // ==========================================
+
   static final HomeLayoutStorage _storage = HomeLayoutStorage();
 
-  // Default cards used on the first launch.
   static const List<HomeMetric> _defaultMetrics = [
     HomeMetric.speed,
     HomeMetric.speedLimit,
@@ -249,12 +284,14 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _layoutLoaded = false;
   bool _saveWarningShown = false;
 
+  // ==========================================
+  // INITIALIZATION
+  // ==========================================
+
   @override
   void initState() {
     super.initState();
 
-    // Load saved layout without blocking the
-    // Flutter application startup.
     unawaited(_loadSavedLayout());
   }
 
@@ -268,18 +305,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (!mounted) return;
 
-      // null means first launch: keep defaults.
+      // First launch: use default cards.
       if (savedIds == null) {
         setState(() {
           _layoutLoaded = true;
         });
+
         return;
       }
 
-      // Map stored names to available enum values.
-      //
-      // Unknown identifiers are ignored so future
-      // changes to telemetry do not crash the app.
+      // Convert stored metric IDs back to enums.
       final metricById = {
         for (final metric in HomeMetric.values) metric.name: metric,
       };
@@ -290,19 +325,18 @@ class _HomeScreenState extends State<HomeScreen> {
       for (final id in savedIds) {
         final metric = metricById[id];
 
+        // Ignore unknown identifiers.
         if (metric == null) continue;
 
+        // Prevent duplicate cards.
         if (seen.add(metric)) {
           restored.add(metric);
         }
       }
 
-      // An empty saved list is valid:
-      // the user intentionally removed everything.
-      //
-      // If the saved list contains only unknown IDs,
-      // keep the defaults rather than showing
-      // an unexpectedly empty dashboard.
+      // An empty list is a valid saved layout.
+      // If every stored ID is unknown, preserve
+      // defaults instead of displaying nothing.
       final useRestored = savedIds.isEmpty || restored.isNotEmpty;
 
       setState(() {
@@ -319,8 +353,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (!mounted) return;
 
-      // Keep the default layout when local
-      // preferences cannot be read.
       setState(() {
         _layoutLoaded = true;
       });
@@ -336,10 +368,6 @@ class _HomeScreenState extends State<HomeScreen> {
   void _saveLayout() {
     if (!_layoutLoaded) return;
 
-    // Save identifiers, not enum indexes.
-    //
-    // Adding new enum values later will not
-    // invalidate existing saved layouts.
     final ids = _metrics.map((metric) => metric.name).toList(growable: false);
 
     unawaited(
@@ -355,9 +383,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 '$error',
               );
 
-              if (!mounted || _saveWarningShown) {
-                return;
-              }
+              if (!mounted || _saveWarningShown) return;
 
               _saveWarningShown = true;
 
@@ -373,15 +399,13 @@ class _HomeScreenState extends State<HomeScreen> {
   void _showStorageWarning(String message) {
     if (!mounted) return;
 
-    final messenger = ScaffoldMessenger.maybeOf(context);
-
-    messenger?.showSnackBar(
-      SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
-    );
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text(message)));
   }
 
   // ==========================================
-  // REMOVE METRIC
+  // REMOVE A METRIC
   // ==========================================
 
   void _removeMetric(HomeMetric metric) {
@@ -397,11 +421,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ==========================================
-  // MOVE METRIC
+  // REORDER METRICS
   // ==========================================
 
   void _moveMetric(HomeMetric source, HomeMetric destination) {
     if (!_layoutLoaded) return;
+
     if (source == destination) return;
 
     final sourceIndex = _metrics.indexOf(source);
@@ -443,7 +468,7 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Column(
                 children: [
                   // ==========================
-                  // SHEET HEADER
+                  // BOTTOM SHEET HEADER
                   // ==========================
                   Padding(
                     padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
@@ -459,7 +484,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                   sheetContext,
                                 ).textTheme.titleLarge,
                               ),
+
                               const SizedBox(height: 6),
+
                               Text(
                                 'Выбери нужные карточки '
                                 'для главной панели',
@@ -470,6 +497,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             ],
                           ),
                         ),
+
                         IconButton(
                           tooltip: 'Закрыть',
                           onPressed: () {
@@ -501,7 +529,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                       sheetContext,
                                     ).colorScheme.primary,
                                   ),
+
                                   const SizedBox(height: 16),
+
                                   const Text(
                                     'Все показатели добавлены',
                                     textAlign: TextAlign.center,
@@ -524,17 +554,22 @@ class _HomeScreenState extends State<HomeScreen> {
                                     horizontal: 14,
                                     vertical: 5,
                                   ),
+
                                   leading: Icon(
                                     metric.icon,
                                     color: Theme.of(
                                       sheetContext,
                                     ).colorScheme.primary,
                                   ),
+
                                   title: Text(metric.title),
+
                                   subtitle: Text(metric.category),
+
                                   trailing: const Icon(
                                     Icons.add_circle_outline,
                                   ),
+
                                   onTap: () {
                                     if (!mounted) return;
 
@@ -543,11 +578,11 @@ class _HomeScreenState extends State<HomeScreen> {
                                         _metrics.add(metric);
                                       });
 
+                                      // Save immediately.
                                       _saveLayout();
                                     }
 
-                                    // Keep the sheet open
-                                    // to add several metrics.
+                                    // Keep sheet open.
                                     setSheetState(() {});
                                   },
                                 ),
@@ -557,7 +592,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
 
                   // ==========================
-                  // FINISH ADDING
+                  // FINISH BUTTON
                   // ==========================
                   SafeArea(
                     top: false,
@@ -589,9 +624,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Wait for preferences before allowing edits.
-    // Otherwise an asynchronous load could replace
-    // the user's newly made changes.
+    // Wait for local settings before editing.
     if (!_layoutLoaded) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -609,7 +642,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 physics: const ClampingScrollPhysics(),
                 slivers: [
                   // ============================
-                  // PAGE DESCRIPTION
+                  // HEADER
                   // ============================
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
@@ -621,12 +654,15 @@ class _HomeScreenState extends State<HomeScreen> {
                             isEditing ? 'Редактирование' : 'Мой TruckLink',
                             style: Theme.of(context).textTheme.headlineMedium,
                           ),
+
                           const SizedBox(height: 7),
+
                           Text(
                             isEditing
                                 ? 'Удерживай карточку и '
                                       'перетащи на место другой. '
-                                      'Нажми крестик, чтобы убрать её.'
+                                      'Нажми крестик, чтобы '
+                                      'убрать её.'
                                 : 'Персональная панель '
                                       'телеметрии',
                             style: Theme.of(context).textTheme.bodyMedium,
@@ -637,7 +673,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
 
                   // ============================
-                  // EMPTY HOME
+                  // EMPTY STATE
                   // ============================
                   if (metrics.isEmpty)
                     const SliverPadding(
@@ -649,12 +685,16 @@ class _HomeScreenState extends State<HomeScreen> {
                             child: Column(
                               children: [
                                 Icon(Icons.dashboard_outlined, size: 44),
+
                                 SizedBox(height: 12),
+
                                 Text(
                                   'Нет выбранных карточек',
                                   textAlign: TextAlign.center,
                                 ),
+
                                 SizedBox(height: 8),
+
                                 Text(
                                   'Добавь показатели, '
                                   'чтобы они появились '
@@ -668,6 +708,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     )
                   else
+                    // ==========================
+                    // METRIC GRID
+                    // ==========================
                     SliverPadding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       sliver: SliverLayoutBuilder(
@@ -721,7 +764,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
 
             // ================================
-            // EDIT MODE BOTTOM ACTION
+            // EDIT MODE BUTTON
             // ================================
             if (isEditing)
               Padding(
@@ -746,7 +789,7 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 // ============================================
-// GRID ITEM / DRAG & DROP
+// HOME GRID ITEM
 // ============================================
 
 class _HomeGridItem extends StatelessWidget {
@@ -762,12 +805,14 @@ class _HomeGridItem extends StatelessWidget {
   final HomeMetric metric;
   final TelemetryConnection connection;
   final bool isEditing;
+
   final VoidCallback onRemove;
 
   final void Function(HomeMetric source, HomeMetric destination) onMove;
 
   @override
   Widget build(BuildContext context) {
+    // Normal display mode.
     if (!isEditing) {
       return _HomeMetricCard(
         metric: metric,
@@ -801,10 +846,12 @@ class _HomeGridItem extends StatelessWidget {
                   color: highlighted ? scheme.primary : Colors.transparent,
                 ),
               ),
+
               child: LongPressDraggable<HomeMetric>(
                 data: metric,
                 maxSimultaneousDrags: 1,
 
+                // Preview while dragging.
                 feedback: Material(
                   color: Colors.transparent,
                   child: SizedBox(
@@ -817,6 +864,7 @@ class _HomeGridItem extends StatelessWidget {
                   ),
                 ),
 
+                // Placeholder left behind.
                 childWhenDragging: Container(
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
@@ -874,9 +922,13 @@ class _DraggingPreview extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Icon(metric.icon, color: scheme.primary),
+
             const SizedBox(height: 12),
+
             Text(metric.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+
             const Spacer(),
+
             Text(
               value,
               maxLines: 1,
@@ -914,6 +966,10 @@ class _HomeMetricCard extends StatefulWidget {
 class _HomeMetricCardState extends State<_HomeMetricCard> {
   late String _value;
 
+  // ==========================================
+  // INITIALIZATION
+  // ==========================================
+
   @override
   void initState() {
     super.initState();
@@ -923,9 +979,17 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
     widget.connection.addListener(_onUpdate);
   }
 
+  // ==========================================
+  // READ TELEMETRY
+  // ==========================================
+
   String _readValue() {
     return widget.metric.formatValue(widget.connection.snapshot);
   }
+
+  // ==========================================
+  // UPDATE LISTENER
+  // ==========================================
 
   @override
   void didUpdateWidget(covariant _HomeMetricCard oldWidget) {
@@ -933,6 +997,7 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
 
     if (oldWidget.connection != widget.connection) {
       oldWidget.connection.removeListener(_onUpdate);
+
       widget.connection.addListener(_onUpdate);
     }
 
@@ -944,12 +1009,17 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
 
     final nextValue = _readValue();
 
+    // Rebuild only if formatted value changed.
     if (nextValue == _value) return;
 
     setState(() {
       _value = nextValue;
     });
   }
+
+  // ==========================================
+  // BUILD
+  // ==========================================
 
   @override
   Widget build(BuildContext context) {
@@ -964,6 +1034,9 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // ============================
+              // ICON / REMOVE
+              // ============================
               Row(
                 children: [
                   Icon(widget.metric.icon, size: 23, color: scheme.primary),
@@ -1001,6 +1074,9 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
 
               const SizedBox(height: 8),
 
+              // ============================
+              // TITLE
+              // ============================
               Text(
                 widget.metric.title,
                 maxLines: 2,
@@ -1010,6 +1086,9 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
 
               const Spacer(),
 
+              // ============================
+              // FORMATTED VALUE
+              // ============================
               Row(
                 children: [
                   Expanded(
@@ -1041,9 +1120,14 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
     );
   }
 
+  // ==========================================
+  // CLEANUP
+  // ==========================================
+
   @override
   void dispose() {
     widget.connection.removeListener(_onUpdate);
+
     super.dispose();
   }
 }
