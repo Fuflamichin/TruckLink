@@ -5,13 +5,23 @@ import 'connection_settings_screen.dart';
 import 'navigation_settings_screen.dart';
 
 // ============================================
-// TRUCKLINK SETTINGS
+// TRUCKLINK SETTINGS SCREEN
 // ============================================
 
 class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key, required this.connection});
+  const SettingsScreen({
+    super.key,
+    required this.connection,
+    this.onNavigationChanged,
+  });
 
   final TelemetryConnection connection;
+
+  /// Called when the navigation editor saves.
+  ///
+  /// AppShell uses this to reload navigation
+  /// without recreating TelemetryConnection.
+  final VoidCallback? onNavigationChanged;
 
   // ==========================================
   // CONNECTION SETTINGS
@@ -34,15 +44,19 @@ class SettingsScreen extends StatelessWidget {
       MaterialPageRoute<bool>(builder: (_) => const NavigationSettingsScreen()),
     );
 
-    if (!context.mounted) return;
+    if (!context.mounted) {
+      return;
+    }
 
     if (saved == true) {
+      // Tell AppShell to reload the saved layout.
+      onNavigationChanged?.call();
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Расположение разделов сохранено. '
-            'Применение к нижней панели '
-            'подключим следующим шагом.',
+            'Настройки навигации сохранены '
+            'и применены.',
           ),
         ),
       );
@@ -91,7 +105,7 @@ class SettingsScreen extends StatelessWidget {
           ),
 
           // ==================================
-          // HOME DASHBOARD
+          // HOME
           // ==================================
           const _SettingsSection(
             icon: Icons.dashboard_customize_outlined,
@@ -148,7 +162,6 @@ class _SettingsSection extends StatelessWidget {
   final IconData icon;
   final String title;
   final String description;
-
   final bool active;
   final VoidCallback? onTap;
 

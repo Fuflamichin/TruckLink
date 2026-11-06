@@ -211,7 +211,7 @@ String _formatJobRoute(TruckJob? job) {
   }
 
   if (!hasDestination) {
-    return source!;
+    return source;
   }
 
   return '$source → $destination';
