@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:telemetry_core/telemetry_core.dart';
@@ -10,13 +8,18 @@ import '../../core/network/telemetry_connection.dart';
 // DASHBOARD SCREEN
 // ============================================
 
-/// Instrument dashboard for ETS2 / ATS.
+/// TruckLink instrument dashboard.
 ///
-/// The screen does not manage WebSocket connections
-/// and does not create its own Scaffold or AppBar.
+/// This screen displays telemetry only.
 ///
-/// AppShell owns the application navigation.
-/// TelemetryConnection owns the network connection.
+/// Connection management is available in:
+/// Settings -> Connection.
+///
+/// AppShell provides the shared AppBar and
+/// bottom navigation.
+///
+/// TelemetryConnection is owned by the app,
+/// not by this screen.
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key, required this.connection});
 
@@ -24,272 +27,115 @@ class DashboardScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      bottom: false,
-      child: CustomScrollView(
-        key: const PageStorageKey<String>('trucklink-dashboard-scroll'),
-        physics: const ClampingScrollPhysics(),
-        slivers: [
-          // ==================================
-          // SCREEN HEADER
-          // ==================================
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 76, 0),
-            sliver: SliverToBoxAdapter(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Приборы',
-                    style: Theme.of(context).textTheme.headlineMedium,
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Телеметрия грузовика в реальном времени',
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                ],
-              ),
+    return CustomScrollView(
+      key: const PageStorageKey<String>('trucklink-dashboard-scroll'),
+      physics: const ClampingScrollPhysics(),
+      slivers: [
+        // ==================================
+        // SCREEN HEADER
+        // ==================================
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+          sliver: SliverToBoxAdapter(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Приборы',
+                  style: Theme.of(context).textTheme.headlineMedium,
+                ),
+
+                const SizedBox(height: 6),
+
+                Text(
+                  'Телеметрия грузовика '
+                  'в реальном времени',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ],
             ),
           ),
-
-          // ==================================
-          // WINDOWS HUB STATUS
-          // ==================================
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
-            sliver: SliverToBoxAdapter(
-              child: _HubStatusCard(connection: connection),
-            ),
-          ),
-
-          // ==================================
-          // INSTRUMENT SECTION HEADER
-          // ==================================
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(20, 26, 20, 12),
-            sliver: SliverToBoxAdapter(
-              child: Text(
-                'Основные показатели',
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-            ),
-          ),
-
-          // ==================================
-          // OPTIMIZED INSTRUMENT GRID
-          // ==================================
-          SliverPadding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            sliver: SliverLayoutBuilder(
-              builder: (context, constraints) {
-                final columns = constraints.crossAxisExtent < 270 ? 1 : 2;
-
-                return SliverGrid(
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: columns,
-                    mainAxisExtent: 152,
-                    mainAxisSpacing: 8,
-                    crossAxisSpacing: 8,
-                  ),
-                  delegate: SliverChildBuilderDelegate((context, index) {
-                    return _MetricCard(
-                      key: ValueKey(index),
-                      connection: connection,
-                      metric: _MetricKind.values[index],
-                    );
-                  }, childCount: _MetricKind.values.length),
-                );
-              },
-            ),
-          ),
-
-          // ==================================
-          // ADDITIONAL INSTRUMENTS
-          // ==================================
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(20, 26, 20, 12),
-            sliver: SliverToBoxAdapter(
-              child: Text(
-                'Дополнительные показатели',
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-            ),
-          ),
-
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-            sliver: SliverToBoxAdapter(
-              child: _AdditionalMetricsCard(connection: connection),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ============================================
-// WINDOWS HUB STATUS CARD
-// ============================================
-
-/// Rebuilds only when the connection status changes,
-/// not on every new telemetry packet.
-class _HubStatusCard extends StatefulWidget {
-  const _HubStatusCard({required this.connection});
-
-  final TelemetryConnection connection;
-
-  @override
-  State<_HubStatusCard> createState() => _HubStatusCardState();
-}
-
-class _HubStatusCardState extends State<_HubStatusCard> {
-  late TelemetryConnectionStatus _status;
-  late String _message;
-
-  @override
-  void initState() {
-    super.initState();
-
-    _readStatus();
-
-    widget.connection.addListener(_onConnectionChanged);
-  }
-
-  void _readStatus() {
-    _status = widget.connection.status;
-    _message = widget.connection.statusMessage;
-  }
-
-  @override
-  void didUpdateWidget(covariant _HubStatusCard oldWidget) {
-    super.didUpdateWidget(oldWidget);
-
-    if (oldWidget.connection != widget.connection) {
-      oldWidget.connection.removeListener(_onConnectionChanged);
-
-      widget.connection.addListener(_onConnectionChanged);
-    }
-
-    _readStatus();
-  }
-
-  void _onConnectionChanged() {
-    if (!mounted) return;
-
-    final nextStatus = widget.connection.status;
-    final nextMessage = widget.connection.statusMessage;
-
-    if (_status == nextStatus && _message == nextMessage) {
-      return;
-    }
-
-    setState(() {
-      _status = nextStatus;
-      _message = nextMessage;
-    });
-  }
-
-  IconData get _statusIcon {
-    return switch (_status) {
-      TelemetryConnectionStatus.connected => Icons.check_circle_rounded,
-
-      TelemetryConnectionStatus.waiting => Icons.hourglass_top_rounded,
-
-      TelemetryConnectionStatus.connecting => Icons.sync_rounded,
-
-      TelemetryConnectionStatus.stale => Icons.warning_amber_rounded,
-
-      TelemetryConnectionStatus.error => Icons.error_outline_rounded,
-
-      TelemetryConnectionStatus.disconnected => Icons.wifi_off_rounded,
-    };
-  }
-
-  Color _statusColor(ColorScheme scheme) {
-    return switch (_status) {
-      TelemetryConnectionStatus.connected => scheme.primary,
-
-      TelemetryConnectionStatus.waiting => scheme.tertiary,
-
-      TelemetryConnectionStatus.connecting => scheme.tertiary,
-
-      TelemetryConnectionStatus.stale => scheme.tertiary,
-
-      TelemetryConnectionStatus.error => scheme.error,
-
-      TelemetryConnectionStatus.disconnected => scheme.onSurfaceVariant,
-    };
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
-        child: Row(
-          children: [
-            Icon(_statusIcon, color: _statusColor(scheme)),
-
-            const SizedBox(width: 12),
-
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Windows Hub',
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-
-                  const SizedBox(height: 4),
-
-                  Text(
-                    _message,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: _statusColor(scheme),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(width: 8),
-
-            IconButton(
-              tooltip: 'Отключиться от компьютера',
-              onPressed: widget.connection.isConnected
-                  ? () {
-                      unawaited(widget.connection.disconnect());
-                    }
-                  : null,
-              icon: const Icon(Icons.logout_rounded),
-            ),
-          ],
         ),
-      ),
+
+        // ==================================
+        // MAIN METRICS HEADER
+        // ==================================
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(20, 26, 20, 12),
+          sliver: SliverToBoxAdapter(
+            child: Text(
+              'Основные показатели',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+          ),
+        ),
+
+        // ==================================
+        // TELEMETRY GRID
+        // ==================================
+        SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          sliver: SliverLayoutBuilder(
+            builder: (context, constraints) {
+              final columns = constraints.crossAxisExtent < 270 ? 1 : 2;
+
+              return SliverGrid(
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: columns,
+                  mainAxisExtent: 152,
+                  mainAxisSpacing: 8,
+                  crossAxisSpacing: 8,
+                ),
+                delegate: SliverChildBuilderDelegate((context, index) {
+                  final metric = _MetricKind.values[index];
+
+                  return _MetricCard(
+                    key: ValueKey(metric),
+                    connection: connection,
+                    metric: metric,
+                  );
+                }, childCount: _MetricKind.values.length),
+              );
+            },
+          ),
+        ),
+
+        // ==================================
+        // ADDITIONAL METRICS HEADER
+        // ==================================
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(20, 26, 20, 12),
+          sliver: SliverToBoxAdapter(
+            child: Text(
+              'Дополнительные показатели',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+          ),
+        ),
+
+        // ==================================
+        // ADDITIONAL METRICS CARD
+        // ==================================
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+          sliver: SliverToBoxAdapter(
+            child: _AdditionalMetricsCard(connection: connection),
+          ),
+        ),
+      ],
     );
-  }
-
-  @override
-  void dispose() {
-    widget.connection.removeListener(_onConnectionChanged);
-
-    super.dispose();
   }
 }
 
 // ============================================
-// INSTRUMENT DEFINITIONS
+// METRIC TYPES
 // ============================================
 
 enum _MetricKind { speed, rpm, gear, fuel, temperature, engineWear }
+
+// ============================================
+// METRIC METADATA
+// ============================================
 
 String _metricTitle(_MetricKind metric) {
   return switch (metric) {
@@ -324,8 +170,14 @@ IconData _metricIcon(_MetricKind metric) {
   };
 }
 
+// ============================================
+// METRIC FORMATTING
+// ============================================
+
 String _metricValue(_MetricKind metric, TruckSnapshot? snapshot) {
-  if (snapshot == null) return '—';
+  if (snapshot == null) {
+    return '—';
+  }
 
   return switch (metric) {
     _MetricKind.speed => snapshot.speedKmh.abs().toStringAsFixed(1),
@@ -358,8 +210,11 @@ String _formatGear(int gear) {
 // OPTIMIZED METRIC CARD
 // ============================================
 
-/// A card only rebuilds when its displayed
-/// formatted value actually changes.
+/// Each metric card listens to the shared
+/// telemetry controller independently.
+///
+/// It rebuilds only when its displayed
+/// formatted value changes.
 class _MetricCard extends StatefulWidget {
   const _MetricCard({
     super.key,
@@ -381,9 +236,13 @@ class _MetricCardState extends State<_MetricCard> {
   void initState() {
     super.initState();
 
-    _value = _metricValue(widget.metric, widget.connection.snapshot);
+    _value = _readValue();
 
     widget.connection.addListener(_onTelemetryChanged);
+  }
+
+  String _readValue() {
+    return _metricValue(widget.metric, widget.connection.snapshot);
   }
 
   @override
@@ -396,15 +255,17 @@ class _MetricCardState extends State<_MetricCard> {
       widget.connection.addListener(_onTelemetryChanged);
     }
 
-    _value = _metricValue(widget.metric, widget.connection.snapshot);
+    _value = _readValue();
   }
 
   void _onTelemetryChanged() {
     if (!mounted) return;
 
-    final nextValue = _metricValue(widget.metric, widget.connection.snapshot);
+    final nextValue = _readValue();
 
-    if (_value == nextValue) return;
+    if (nextValue == _value) {
+      return;
+    }
 
     setState(() {
       _value = nextValue;
@@ -413,6 +274,8 @@ class _MetricCardState extends State<_MetricCard> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
     return RepaintBoundary(
       child: Card(
         margin: EdgeInsets.zero,
@@ -424,7 +287,7 @@ class _MetricCardState extends State<_MetricCard> {
               Icon(
                 _metricIcon(widget.metric),
                 size: 22,
-                color: Theme.of(context).colorScheme.primary,
+                color: theme.colorScheme.primary,
               ),
 
               const SizedBox(height: 10),
@@ -433,7 +296,7 @@ class _MetricCardState extends State<_MetricCard> {
                 _metricTitle(widget.metric),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.labelMedium,
+                style: theme.textTheme.labelMedium,
               ),
 
               const Spacer(),
@@ -448,7 +311,7 @@ class _MetricCardState extends State<_MetricCard> {
                       child: Text(
                         _value,
                         maxLines: 1,
-                        style: Theme.of(context).textTheme.headlineSmall,
+                        style: theme.textTheme.headlineSmall,
                       ),
                     ),
                   ),
@@ -458,7 +321,7 @@ class _MetricCardState extends State<_MetricCard> {
 
                     Text(
                       _metricUnit(widget.metric),
-                      style: Theme.of(context).textTheme.labelSmall,
+                      style: theme.textTheme.labelSmall,
                     ),
                   ],
                 ],
@@ -479,7 +342,7 @@ class _MetricCardState extends State<_MetricCard> {
 }
 
 // ============================================
-// ADDITIONAL METRICS
+// ADDITIONAL METRICS CARD
 // ============================================
 
 class _AdditionalMetricsCard extends StatefulWidget {
@@ -492,9 +355,7 @@ class _AdditionalMetricsCard extends StatefulWidget {
 }
 
 class _AdditionalMetricsCardState extends State<_AdditionalMetricsCard> {
-  late List<String> _values;
-
-  static const _labels = <String>[
+  static const List<String> _labels = [
     'Двигатель',
     'Пробег',
     'Максимальные обороты',
@@ -503,6 +364,8 @@ class _AdditionalMetricsCardState extends State<_AdditionalMetricsCard> {
     'Ограничение скорости',
     'Стояночный тормоз',
   ];
+
+  late List<String> _values;
 
   @override
   void initState() {
@@ -525,6 +388,10 @@ class _AdditionalMetricsCardState extends State<_AdditionalMetricsCard> {
 
     _values = _buildValues(widget.connection.snapshot);
   }
+
+  // ==========================================
+  // FORMAT VALUES
+  // ==========================================
 
   List<String> _buildValues(TruckSnapshot? snapshot) {
     if (snapshot == null) {
@@ -561,6 +428,10 @@ class _AdditionalMetricsCardState extends State<_AdditionalMetricsCard> {
     ];
   }
 
+  // ==========================================
+  // UPDATE ONLY WHEN NEEDED
+  // ==========================================
+
   void _onTelemetryChanged() {
     if (!mounted) return;
 
@@ -574,6 +445,10 @@ class _AdditionalMetricsCardState extends State<_AdditionalMetricsCard> {
       _values = nextValues;
     });
   }
+
+  // ==========================================
+  // BUILD
+  // ==========================================
 
   @override
   Widget build(BuildContext context) {
@@ -605,7 +480,7 @@ class _AdditionalMetricsCardState extends State<_AdditionalMetricsCard> {
 }
 
 // ============================================
-// INFORMATION ROW
+// REUSABLE INFORMATION ROW
 // ============================================
 
 class _MetricInfoRow extends StatelessWidget {
@@ -616,20 +491,16 @@ class _MetricInfoRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final style = Theme.of(context).textTheme.bodyMedium;
+
     return Row(
       children: [
-        Expanded(
-          child: Text(label, style: Theme.of(context).textTheme.bodyMedium),
-        ),
+        Expanded(child: Text(label, style: style)),
 
         const SizedBox(width: 12),
 
         Flexible(
-          child: Text(
-            value,
-            textAlign: TextAlign.right,
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
+          child: Text(value, textAlign: TextAlign.right, style: style),
         ),
       ],
     );
