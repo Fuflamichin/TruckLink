@@ -21,23 +21,17 @@ import 'navigation/trucklink_pill_navigation.dart';
 IconData _sectionIcon(TruckLinkSection section) {
   return switch (section) {
     TruckLinkSection.home => Icons.home_outlined,
-
     TruckLinkSection.instruments => Icons.speed_outlined,
-
     TruckLinkSection.truck => Icons.local_shipping_outlined,
-
     TruckLinkSection.job => Icons.inventory_2_outlined,
-
     TruckLinkSection.finances => Icons.account_balance_wallet_outlined,
-
     TruckLinkSection.map => Icons.map_outlined,
-
     TruckLinkSection.statistics => Icons.bar_chart_outlined,
   };
 }
 
 // ============================================
-// APP SHELL
+// TRUCKLINK APP SHELL
 // ============================================
 
 class AppShell extends StatefulWidget {
@@ -62,12 +56,20 @@ class _AppShellState extends State<AppShell> {
   static const String _morePageId = '__more__';
 
   // ==========================================
-  // STORAGE AND STATE
+  // STORAGE
   // ==========================================
 
   final NavigationLayoutStorage _storage = NavigationLayoutStorage();
 
+  // ==========================================
+  // HOME EDIT MODE
+  // ==========================================
+
   final ValueNotifier<bool> _homeEditMode = ValueNotifier<bool>(false);
+
+  // ==========================================
+  // NAVIGATION STATE
+  // ==========================================
 
   final Set<String> _visited = {};
 
@@ -98,7 +100,7 @@ class _AppShellState extends State<AppShell> {
   }
 
   // ==========================================
-  // RELOAD SAVED NAVIGATION
+  // LOAD SAVED NAVIGATION
   // ==========================================
 
   Future<void> _reloadNavigation() async {
@@ -125,7 +127,7 @@ class _AppShellState extends State<AppShell> {
   }
 
   // ==========================================
-  // VALIDATE SELECTED PAGE
+  // VALIDATE CURRENT PAGE
   // ==========================================
 
   void _validateSelection() {
@@ -139,7 +141,7 @@ class _AppShellState extends State<AppShell> {
       return;
     }
 
-    // Current page is hidden or removed.
+    // Selected page was hidden or removed.
     _homeEditMode.value = false;
 
     _selectedId = _navigation.bottomItems.isEmpty
@@ -167,7 +169,7 @@ class _AppShellState extends State<AppShell> {
   }
 
   // ==========================================
-  // SELECT NAVIGATION PAGE
+  // SELECT PAGE
   // ==========================================
 
   void _selectPage(String id) {
@@ -204,7 +206,6 @@ class _AppShellState extends State<AppShell> {
       MaterialPageRoute<void>(
         builder: (_) => SettingsScreen(
           connection: widget.connection,
-
           onNavigationChanged: () {
             unawaited(_reloadNavigation());
           },
@@ -218,7 +219,7 @@ class _AppShellState extends State<AppShell> {
   }
 
   // ==========================================
-  // CREATE SECTION PAGE
+  // BUILD SECTION PAGE
   // ==========================================
 
   Widget _sectionPage(TruckLinkSection section) {
@@ -263,7 +264,7 @@ class _AppShellState extends State<AppShell> {
   }
 
   // ==========================================
-  // CREATE NAVIGATION ITEM PAGE
+  // BUILD NAVIGATION PAGE
   // ==========================================
 
   Widget _itemPage(_ShellNavigationItem item) {
@@ -275,7 +276,7 @@ class _AppShellState extends State<AppShell> {
   }
 
   // ==========================================
-  // NAVIGATION ITEM ICON
+  // NAVIGATION ICON
   // ==========================================
 
   IconData _icon(_ShellNavigationItem item) {
@@ -287,7 +288,7 @@ class _AppShellState extends State<AppShell> {
   }
 
   // ==========================================
-  // NAVIGATION ITEM ACTIVE ICON
+  // ACTIVE NAVIGATION ICON
   // ==========================================
 
   IconData _activeIcon(_ShellNavigationItem item) {
@@ -297,17 +298,11 @@ class _AppShellState extends State<AppShell> {
 
     return switch (item.sections.first) {
       TruckLinkSection.home => Icons.home_rounded,
-
       TruckLinkSection.instruments => Icons.speed,
-
       TruckLinkSection.truck => Icons.local_shipping_rounded,
-
       TruckLinkSection.job => Icons.inventory_2_rounded,
-
       TruckLinkSection.finances => Icons.account_balance_wallet_rounded,
-
       TruckLinkSection.map => Icons.map_rounded,
-
       TruckLinkSection.statistics => Icons.bar_chart_rounded,
     };
   }
@@ -322,12 +317,10 @@ class _AppShellState extends State<AppShell> {
 
     return AppBar(
       title: Text(item?.title ?? 'TruckLink'),
-
       automaticallyImplyLeading: false,
-
       actions: [
         // ====================================
-        // HOME EDITING
+        // HOME EDIT BUTTON
         // ====================================
         if (hasHome)
           ValueListenableBuilder<bool>(
@@ -335,9 +328,7 @@ class _AppShellState extends State<AppShell> {
             builder: (context, editing, child) {
               return IconButton(
                 tooltip: editing ? 'Готово' : 'Редактировать главную',
-
                 icon: Icon(editing ? Icons.check_rounded : Icons.edit_outlined),
-
                 onPressed: () {
                   _homeEditMode.value = !editing;
                 },
@@ -346,7 +337,7 @@ class _AppShellState extends State<AppShell> {
           ),
 
         // ====================================
-        // SETTINGS
+        // SETTINGS BUTTON
         // ====================================
         IconButton(
           tooltip: 'Настройки',
@@ -362,7 +353,7 @@ class _AppShellState extends State<AppShell> {
   }
 
   // ==========================================
-  // NEW FLOATING BOTTOM NAVIGATION
+  // FLOATING BOTTOM NAVIGATION
   // ==========================================
 
   Widget _bottomBar() {
@@ -380,9 +371,25 @@ class _AppShellState extends State<AppShell> {
         ? bottomIndex
         : 0;
 
-    // The bottom bar is now an icon-only
-    // floating rounded pill, as in the
-    // TruckLink design reference.
+    // ========================================
+    // IMPORTANT:
+    // ========================================
+    //
+    // We intentionally do NOT add:
+    //
+    // Container(color: ...)
+    // Card(...)
+    // ColoredBox(...)
+    // BottomAppBar(...)
+    //
+    // around the whole navigation area.
+    //
+    // Only TruckLinkPillNavigation paints
+    // its own rounded background.
+    //
+    // The surrounding SafeArea and Padding
+    // are transparent.
+
     return SafeArea(
       top: false,
       minimum: const EdgeInsets.only(bottom: 8),
@@ -391,7 +398,6 @@ class _AppShellState extends State<AppShell> {
         child: TruckLinkPillNavigation(
           style: TruckLinkPillStyle.bottom,
           selectedIndex: selectedIndex,
-
           items: [
             for (final item in bottom)
               TruckLinkPillItem(
@@ -406,7 +412,6 @@ class _AppShellState extends State<AppShell> {
               activeIcon: Icons.more_rounded,
             ),
           ],
-
           onSelected: (index) {
             if (index == bottom.length) {
               _selectPage(_morePageId);
@@ -439,9 +444,42 @@ class _AppShellState extends State<AppShell> {
         : pages.indexWhere((item) => item.id == _selectedId);
 
     return Scaffold(
+      // ======================================
+      // TELEGRAM-STYLE FLOATING NAVIGATION
+      // ======================================
+
+      // THIS IS THE MAIN FIX.
+      //
+      // Without extendBody:
+      // Scaffold reserves a separate rectangle
+      // for bottomNavigationBar, reducing
+      // the visible content area.
+      //
+      // With extendBody:
+      // content extends behind the dock.
+      // Only the pill itself paints a background.
+      extendBody: true,
+
+      // Keep the normal system-safe app bar.
+      // There is no need to extend content
+      // behind the status bar.
+      extendBodyBehindAppBar: false,
+
+      // ======================================
+      // APP BAR
+      // ======================================
       appBar: _appBar(selectedItem),
 
-      // Keep visited pages mounted.
+      // ======================================
+      // FULL-HEIGHT PAGE CONTENT
+      // ======================================
+
+      // The IndexedStack now extends behind
+      // the floating bottom navigation.
+      //
+      // This allows content and scrolling
+      // to continue behind the pill rather
+      // than stopping above its rectangle.
       body: IndexedStack(
         index: index < 0 ? 0 : index,
         children: [
@@ -467,7 +505,9 @@ class _AppShellState extends State<AppShell> {
         ],
       ),
 
-      // New custom pill navigation.
+      // ======================================
+      // TRANSPARENT AREA + FLOATING PILL
+      // ======================================
       bottomNavigationBar: _bottomBar(),
     );
   }
@@ -543,9 +583,12 @@ class _ResolvedNavigation {
     NavigationLayout layout,
     SavedNavigationLayout? saved,
   ) {
-    const maxBottom = 4;
+    const int maxBottom = 4;
 
-    // Existing configuration is the catalog.
+    // ========================================
+    // ALL AVAILABLE NAVIGATION ITEMS
+    // ========================================
+
     final catalog = <String, NavigationItemConfig>{
       for (final item in [
         ...layout.visibleItems,
@@ -576,7 +619,6 @@ class _ResolvedNavigation {
       }
 
       final sections = <TruckLinkSection>[];
-
       final seenSections = <TruckLinkSection>{};
 
       for (final memberId in group.memberIds) {
@@ -601,12 +643,11 @@ class _ResolvedNavigation {
     }
 
     // ========================================
-    // BOTTOM / MORE
+    // BOTTOM / MORE LISTS
     // ========================================
 
     final bottom = <_ShellNavigationItem>[];
     final more = <_ShellNavigationItem>[];
-
     final used = <String>{};
 
     void add(String id, List<_ShellNavigationItem> target) {
@@ -712,9 +753,7 @@ class _CombinedSectionsPage extends StatelessWidget {
         '${item.id}:'
         '${item.sections.map((section) => section.name).join(",")}',
       ),
-
       length: item.sections.length,
-
       child: Builder(
         builder: (tabContext) {
           final controller = DefaultTabController.of(tabContext);
@@ -722,19 +761,16 @@ class _CombinedSectionsPage extends StatelessWidget {
           return Column(
             children: [
               // ==============================
-              // FLOATING INNER TAB BAR
+              // FLOATING GROUP TAB BAR
               // ==============================
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
-
                 child: AnimatedBuilder(
                   animation: controller,
-
                   builder: (context, child) {
                     return TruckLinkPillNavigation(
                       style: TruckLinkPillStyle.group,
                       selectedIndex: controller.index,
-
                       items: [
                         for (final section in item.sections)
                           TruckLinkPillItem(
@@ -742,7 +778,6 @@ class _CombinedSectionsPage extends StatelessWidget {
                             icon: _sectionIcon(section),
                           ),
                       ],
-
                       onSelected: (index) {
                         controller.animateTo(
                           index,
@@ -756,7 +791,7 @@ class _CombinedSectionsPage extends StatelessWidget {
               ),
 
               // ==============================
-              // INNER CONTENT
+              // GROUP CONTENT
               // ==============================
               Expanded(
                 child: TabBarView(
@@ -787,16 +822,11 @@ class _MoreNavigationPage extends StatelessWidget {
   });
 
   final List<_ShellNavigationItem> items;
-
   final String? selectedId;
 
   final IconData Function(_ShellNavigationItem) iconFor;
 
   final ValueChanged<String> onSelect;
-
-  // ==========================================
-  // BUILD
-  // ==========================================
 
   @override
   Widget build(BuildContext context) {
@@ -812,15 +842,20 @@ class _MoreNavigationPage extends StatelessWidget {
 
     final scheme = Theme.of(context).colorScheme;
 
+    // When Scaffold.extendBody is true,
+    // its MediaQuery supplies a bottom inset
+    // for the floating navigation bar.
+    //
+    // Apply that inset to this scrollable page,
+    // so the last item can scroll above the dock.
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+
     return ListView(
       key: const PageStorageKey<String>('trucklink-more'),
-
-      padding: const EdgeInsets.all(16),
-
+      padding: EdgeInsets.fromLTRB(16, 16, 16, bottomInset + 24),
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(4, 4, 4, 16),
-
           child: Text(
             'Дополнительные разделы',
             style: Theme.of(context).textTheme.titleLarge,
@@ -830,22 +865,16 @@ class _MoreNavigationPage extends StatelessWidget {
         for (final item in items)
           Card(
             margin: const EdgeInsets.only(bottom: 10),
-
             child: ListTile(
               leading: Icon(iconFor(item), color: scheme.primary),
-
               title: Text(item.title),
-
               subtitle: item.sections.length > 1
                   ? Text(
                       item.sections.map((section) => section.title).join(' · '),
                     )
                   : null,
-
               selected: item.id == selectedId,
-
               trailing: const Icon(Icons.chevron_right_rounded),
-
               onTap: () {
                 onSelect(item.id);
               },
@@ -878,7 +907,6 @@ class _ComingSoonPage extends StatelessWidget {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
-
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [

@@ -1,32 +1,31 @@
-import 'package:design_system/design_system.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'app/app_shell.dart';
+import 'core/appearance/appearance_provider.dart';
+import 'core/appearance/trucklink_appearance_theme.dart';
 import 'core/network/telemetry_connection.dart';
 import 'features/connection/connection_screen.dart';
 
 // ============================================
-// TRUCKLINK MOBILE
+// APPLICATION ENTRY POINT
 // ============================================
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // TruckLink is designed for portrait mode.
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-    DeviceOrientation.portraitDown,
-  ]);
+  // TruckLink currently uses portrait mode.
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
-  // Match Android system bars with the
-  // dark TruckLink branding.
+  // Dark system navigation and status bars.
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
       statusBarIconBrightness: Brightness.light,
-      systemNavigationBarColor: TruckLinkColors.background,
+      systemNavigationBarColor: Color(0xFF091018),
       systemNavigationBarIconBrightness: Brightness.light,
     ),
   );
@@ -35,17 +34,13 @@ Future<void> main() async {
 }
 
 // ============================================
-// SHARED TELEMETRY CONNECTION
+// TELEMETRY CONNECTION PROVIDER
 // ============================================
 
-/// One TelemetryConnection for the entire app.
+/// One WebSocket connection for the application.
 ///
-/// The connection is created once and shared
-/// between ConnectionScreen, AppShell,
-/// DashboardScreen and SettingsScreen.
-///
-/// The provider disposes the connection
-/// when its lifetime ends.
+/// Changing themes or navigation must never
+/// create another connection to Windows Hub.
 final telemetryConnectionProvider = Provider<TelemetryConnection>((ref) {
   final connection = TelemetryConnection();
 
@@ -55,7 +50,7 @@ final telemetryConnectionProvider = Provider<TelemetryConnection>((ref) {
 });
 
 // ============================================
-// ROOT APPLICATION
+// TRUCKLINK APPLICATION
 // ============================================
 
 class TruckLinkApp extends ConsumerWidget {
@@ -63,21 +58,27 @@ class TruckLinkApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // The connection is independent
+    // from the appearance controller.
     final connection = ref.watch(telemetryConnectionProvider);
 
-    return MaterialApp(
-      title: 'TruckLink',
+    // One globally shared appearance controller.
+    final appearance = ref.watch(appearanceControllerProvider);
 
-      debugShowCheckedModeBanner: false,
+    // ChangeNotifier changes trigger a theme
+    // rebuild without recreating Riverpod state.
+    return ListenableBuilder(
+      listenable: appearance,
+      builder: (context, child) {
+        final theme = TruckLinkAppearanceTheme.build(appearance.settings);
 
-      // Shared branded theme from design_system.
-      theme: TruckLinkTheme.dark,
-
-      themeMode: ThemeMode.dark,
-
-      // The gate controls the active screen
-      // according to WebSocket status.
-      home: _ConnectionGate(connection: connection),
+        return MaterialApp(
+          title: 'TruckLink',
+          debugShowCheckedModeBanner: false,
+          theme: theme,
+          home: _ConnectionGate(connection: connection),
+        );
+      },
     );
   }
 }
@@ -86,18 +87,11 @@ class TruckLinkApp extends ConsumerWidget {
 // CONNECTION GATE
 // ============================================
 
-/// Switches automatically between:
+/// Displays the connection screen until
+/// Windows Hub is connected.
 ///
-/// 1. ConnectionScreen - no connection
-/// 2. AppShell         - Windows Hub connected
-///
-/// A connected WebSocket does not require
-/// ETS2/ATS to be running.
-///
-/// TelemetryConnection.isConnected includes
-/// waiting, connected and stale statuses.
-///
-/// No onConnected callback is needed.
+/// Once connected, the user gets AppShell
+/// with the personalized navigation.
 class _ConnectionGate extends StatelessWidget {
   const _ConnectionGate({required this.connection});
 
@@ -108,25 +102,11 @@ class _ConnectionGate extends StatelessWidget {
     return ListenableBuilder(
       listenable: connection,
       builder: (context, child) {
-        // ====================================
-        // CONNECTED TO WINDOWS HUB
-        // ====================================
-
         if (connection.isConnected) {
-          return AppShell(
-            key: const ValueKey('trucklink-app-shell'),
-            connection: connection,
-          );
+          return AppShell(connection: connection);
         }
 
-        // ====================================
-        // NOT CONNECTED
-        // ====================================
-
-        return ConnectionScreen(
-          key: const ValueKey('trucklink-connection-screen'),
-          connection: connection,
-        );
+        return ConnectionScreen(connection: connection);
       },
     );
   }
