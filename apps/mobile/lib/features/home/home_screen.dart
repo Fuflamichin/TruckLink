@@ -1,19 +1,21 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:telemetry_core/telemetry_core.dart';
+import 'package:telemetry_core/job_telemetry.dart';
 
 import '../../core/formatting/telemetry_format.dart';
 import '../../core/network/telemetry_connection.dart';
 import 'data/home_layout_storage.dart';
 
 // ============================================
-// AVAILABLE HOME METRICS
+// HOME METRICS
 // ============================================
 
-// Keep these identifiers unchanged.
-// They are stored in shared_preferences.
+// IMPORTANT:
+// These identifiers are saved in shared_preferences.
+// Do not rename them, or users may lose their layout.
 enum HomeMetric {
   speed,
   speedLimit,
@@ -38,43 +40,35 @@ enum HomeMetric {
 // JOB FORMATTING
 // ============================================
 
-String _formatRoute(TruckJob? job) {
+String _formatRoute(TruckLinkJobTelemetry? job) {
   if (job == null) {
     return 'Нет данных';
   }
 
-  final source = job.sourceCity;
-  final destination = job.destinationCity;
+  final source = job.sourceCity.trim();
+  final destination = job.destinationCity.trim();
 
-  if (source == null && destination == null) {
+  if (source.isEmpty && destination.isEmpty) {
     return 'Нет данных';
   }
 
-  if (source == null) {
-    return destination!;
+  if (source.isEmpty) {
+    return destination;
   }
 
-  if (destination == null) {
+  if (destination.isEmpty) {
     return source;
   }
 
   return '$source → $destination';
 }
 
-String _formatReward(TruckJob? job) {
-  final reward = job?.reward;
-
-  if (reward == null) {
+String _formatReward(TruckLinkJobTelemetry? job) {
+  if (job == null) {
     return 'Нет данных';
   }
 
-  final number = num.tryParse(reward.toString());
-
-  if (number != null) {
-    return TelemetryFormat.integer(number);
-  }
-
-  return reward.toString();
+  return TelemetryFormat.integer(job.income);
 }
 
 // ============================================
@@ -83,7 +77,7 @@ String _formatReward(TruckJob? job) {
 
 extension HomeMetricInfo on HomeMetric {
   // ==========================================
-  // TITLES
+  // TITLE
   // ==========================================
 
   String get title => switch (this) {
@@ -107,7 +101,7 @@ extension HomeMetricInfo on HomeMetric {
   };
 
   // ==========================================
-  // ICONS
+  // ICON
   // ==========================================
 
   IconData get icon => switch (this) {
@@ -131,7 +125,7 @@ extension HomeMetricInfo on HomeMetric {
   };
 
   // ==========================================
-  // CATEGORIES
+  // CATEGORY
   // ==========================================
 
   String get category => switch (this) {
@@ -158,88 +152,111 @@ extension HomeMetricInfo on HomeMetric {
   };
 
   // ==========================================
-  // LIVE TELEMETRY FORMATTING
+  // FORMAT METRIC VALUE
   // ==========================================
 
-  String formatValue(TruckSnapshot? snapshot) {
-    // Financial telemetry is not connected yet.
+  String formatValue(
+    TruckSnapshot? snapshot, {
+    TruckLinkJobTelemetry? activeJob,
+  }) {
+    // ========================================
+    // REAL JOB DATA - v0.7.3
+    // ========================================
+
+    // Job data is received via "job_update".
+    //
+    // It is stored in connection.activeJob,
+    // NOT in snapshot.job.
+    //
+    // Therefore job metrics must be handled
+    // before checking whether snapshot is null.
+
+    // Current cargo.
+    if (this == HomeMetric.cargo) {
+      final cargo = activeJob?.cargoName.trim() ?? '';
+
+      return cargo.isEmpty ? 'Нет данных' : cargo;
+    }
+
+    // Source city -> destination city.
+    if (this == HomeMetric.route) {
+      return _formatRoute(activeJob);
+    }
+
+    // Actual job reward.
+    if (this == HomeMetric.jobReward) {
+      return _formatReward(activeJob);
+    }
+
+    // Remaining route distance.
+    if (this == HomeMetric.remainingDistance) {
+      final remaining = activeJob?.navigationDistanceKm;
+
+      if (remaining == null || !remaining.isFinite || remaining <= 0) {
+        return 'Нет данных';
+      }
+
+      return TelemetryFormat.distance(remaining);
+    }
+
+    // Balance will be added in the
+    // financial telemetry update.
     if (this == HomeMetric.balance) {
       return 'Нет данных';
     }
+
+    // ========================================
+    // EXISTING TRUCK TELEMETRY
+    // ========================================
 
     if (snapshot == null) {
       return TelemetryFormat.unavailable;
     }
 
-    final job = snapshot.job;
-
     return switch (this) {
-      // Speed
       HomeMetric.speed => TelemetryFormat.speed(snapshot.speedKmh),
 
-      // Road speed limit
       HomeMetric.speedLimit => TelemetryFormat.speedLimit(
         snapshot.speedLimitKmh,
       ),
 
-      // Engine revolutions
       HomeMetric.rpm => TelemetryFormat.rpm(snapshot.rpm),
 
-      // Current gear
       HomeMetric.gear => TelemetryFormat.gear(snapshot.gear),
 
-      // Fuel percentage
       HomeMetric.fuelPercent =>
         snapshot.fuelCapacityLiters <= 0
             ? TelemetryFormat.unavailable
             : TelemetryFormat.percent(snapshot.fuelPercent),
 
-      // Liters remaining
       HomeMetric.fuelLiters => TelemetryFormat.liters(snapshot.fuelLiters),
 
-      // Engine state
       HomeMetric.engineOn => TelemetryFormat.onOff(snapshot.engineOn),
 
-      // Water temperature
       HomeMetric.temperature => TelemetryFormat.temperature(
         snapshot.waterTemperatureC,
       ),
 
-      // Engine wear
       HomeMetric.engineWear => TelemetryFormat.percent(
         snapshot.engineWearPercent,
       ),
 
-      // Total odometer
       HomeMetric.odometer => TelemetryFormat.distance(snapshot.odometerKm),
 
-      // Cruise control
       HomeMetric.cruiseControl => TelemetryFormat.cruiseControl(
         snapshot.cruiseControlKmh,
       ),
 
-      // Parking brake
       HomeMetric.parkBrake => TelemetryFormat.onOff(
         snapshot.parkBrake,
         enabled: 'Активен',
       ),
 
-      // Job cargo
-      HomeMetric.cargo => job?.cargoName ?? 'Нет данных',
-
-      // Job route
-      HomeMetric.route => _formatRoute(job),
-
-      // Job reward
-      HomeMetric.jobReward => _formatReward(job),
-
-      // Remaining job distance
-      HomeMetric.remainingDistance =>
-        job?.remainingDistanceKm == null
-            ? 'Нет данных'
-            : TelemetryFormat.distance(job!.remainingDistanceKm),
-
-      // Finance balance
+      // Already handled above.
+      HomeMetric.cargo ||
+      HomeMetric.route ||
+      HomeMetric.jobReward ||
+      HomeMetric.remainingDistance ||
       HomeMetric.balance => 'Нет данных',
     };
   }
@@ -257,8 +274,6 @@ class HomeScreen extends StatefulWidget {
   });
 
   final TelemetryConnection connection;
-
-  // Controlled by AppShell's edit button.
   final ValueListenable<bool> editMode;
 
   @override
@@ -267,7 +282,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   // ==========================================
-  // LOCAL STORAGE
+  // LAYOUT STORAGE
   // ==========================================
 
   static final HomeLayoutStorage _storage = HomeLayoutStorage();
@@ -305,7 +320,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (!mounted) return;
 
-      // First launch: use default cards.
       if (savedIds == null) {
         setState(() {
           _layoutLoaded = true;
@@ -314,7 +328,6 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
-      // Convert stored metric IDs back to enums.
       final metricById = {
         for (final metric in HomeMetric.values) metric.name: metric,
       };
@@ -325,18 +338,16 @@ class _HomeScreenState extends State<HomeScreen> {
       for (final id in savedIds) {
         final metric = metricById[id];
 
-        // Ignore unknown identifiers.
-        if (metric == null) continue;
-
-        // Prevent duplicate cards.
-        if (seen.add(metric)) {
+        if (metric != null && seen.add(metric)) {
           restored.add(metric);
         }
       }
 
-      // An empty list is a valid saved layout.
-      // If every stored ID is unknown, preserve
-      // defaults instead of displaying nothing.
+      // An empty list means the user removed
+      // all cards intentionally.
+      //
+      // A list containing only unknown IDs
+      // falls back to the default layout.
       final useRestored = savedIds.isEmpty || restored.isNotEmpty;
 
       setState(() {
@@ -349,7 +360,10 @@ class _HomeScreenState extends State<HomeScreen> {
         _layoutLoaded = true;
       });
     } catch (error) {
-      debugPrint('TruckLink: unable to load home layout: $error');
+      debugPrint(
+        'TruckLink: unable to load home layout: '
+        '$error',
+      );
 
       if (!mounted) return;
 
@@ -362,7 +376,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ==========================================
-  // SAVE CURRENT LAYOUT
+  // SAVE LAYOUT
   // ==========================================
 
   void _saveLayout() {
@@ -379,22 +393,28 @@ class _HomeScreenState extends State<HomeScreen> {
             },
             onError: (Object error, StackTrace stackTrace) {
               debugPrint(
-                'TruckLink: unable to save home layout: '
-                '$error',
+                'TruckLink: unable to save home '
+                'layout: $error',
               );
 
-              if (!mounted || _saveWarningShown) return;
+              if (!mounted || _saveWarningShown) {
+                return;
+              }
 
               _saveWarningShown = true;
 
               _showStorageWarning(
-                'Не удалось сохранить расположение '
-                'карточек.',
+                'Не удалось сохранить '
+                'расположение карточек.',
               );
             },
           ),
     );
   }
+
+  // ==========================================
+  // STORAGE WARNING
+  // ==========================================
 
   void _showStorageWarning(String message) {
     if (!mounted) return;
@@ -405,13 +425,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ==========================================
-  // REMOVE A METRIC
+  // REMOVE CARD
   // ==========================================
 
   void _removeMetric(HomeMetric metric) {
-    if (!_layoutLoaded) return;
-
-    if (!_metrics.contains(metric)) return;
+    if (!_layoutLoaded || !_metrics.contains(metric)) {
+      return;
+    }
 
     setState(() {
       _metrics.remove(metric);
@@ -421,15 +441,16 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ==========================================
-  // REORDER METRICS
+  // REORDER CARDS
   // ==========================================
 
   void _moveMetric(HomeMetric source, HomeMetric destination) {
-    if (!_layoutLoaded) return;
-
-    if (source == destination) return;
+    if (!_layoutLoaded || source == destination) {
+      return;
+    }
 
     final sourceIndex = _metrics.indexOf(source);
+
     final destinationIndex = _metrics.indexOf(destination);
 
     if (sourceIndex < 0 || destinationIndex < 0) {
@@ -438,6 +459,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       final item = _metrics.removeAt(sourceIndex);
+
       _metrics.insert(destinationIndex, item);
     });
 
@@ -468,7 +490,7 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Column(
                 children: [
                   // ==========================
-                  // BOTTOM SHEET HEADER
+                  // HEADER
                   // ==========================
                   Padding(
                     padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
@@ -484,12 +506,11 @@ class _HomeScreenState extends State<HomeScreen> {
                                   sheetContext,
                                 ).textTheme.titleLarge,
                               ),
-
                               const SizedBox(height: 6),
-
                               Text(
-                                'Выбери нужные карточки '
-                                'для главной панели',
+                                'Выбери нужные '
+                                'карточки для '
+                                'главной панели',
                                 style: Theme.of(
                                   sheetContext,
                                 ).textTheme.bodySmall,
@@ -497,12 +518,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             ],
                           ),
                         ),
-
                         IconButton(
                           tooltip: 'Закрыть',
-                          onPressed: () {
-                            Navigator.of(sheetContext).pop();
-                          },
+                          onPressed: () => Navigator.of(sheetContext).pop(),
                           icon: const Icon(Icons.close_rounded),
                         ),
                       ],
@@ -529,11 +547,10 @@ class _HomeScreenState extends State<HomeScreen> {
                                       sheetContext,
                                     ).colorScheme.primary,
                                   ),
-
                                   const SizedBox(height: 16),
-
                                   const Text(
-                                    'Все показатели добавлены',
+                                    'Все показатели '
+                                    'добавлены',
                                     textAlign: TextAlign.center,
                                   ),
                                 ],
@@ -554,35 +571,30 @@ class _HomeScreenState extends State<HomeScreen> {
                                     horizontal: 14,
                                     vertical: 5,
                                   ),
-
                                   leading: Icon(
                                     metric.icon,
                                     color: Theme.of(
                                       sheetContext,
                                     ).colorScheme.primary,
                                   ),
-
                                   title: Text(metric.title),
-
                                   subtitle: Text(metric.category),
-
                                   trailing: const Icon(
                                     Icons.add_circle_outline,
                                   ),
-
                                   onTap: () {
-                                    if (!mounted) return;
+                                    if (!mounted) {
+                                      return;
+                                    }
 
                                     if (!_metrics.contains(metric)) {
                                       setState(() {
                                         _metrics.add(metric);
                                       });
 
-                                      // Save immediately.
                                       _saveLayout();
                                     }
 
-                                    // Keep sheet open.
                                     setSheetState(() {});
                                   },
                                 ),
@@ -592,7 +604,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
 
                   // ==========================
-                  // FINISH BUTTON
+                  // DONE BUTTON
                   // ==========================
                   SafeArea(
                     top: false,
@@ -601,9 +613,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: SizedBox(
                         width: double.infinity,
                         child: FilledButton(
-                          onPressed: () {
-                            Navigator.of(sheetContext).pop();
-                          },
+                          onPressed: () => Navigator.of(sheetContext).pop(),
                           child: const Text('Готово'),
                         ),
                       ),
@@ -619,12 +629,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ==========================================
-  // BUILD
+  // HOME PAGE BUILD
   // ==========================================
 
   @override
   Widget build(BuildContext context) {
-    // Wait for local settings before editing.
     if (!_layoutLoaded) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -641,9 +650,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 key: const PageStorageKey<String>('trucklink-home'),
                 physics: const ClampingScrollPhysics(),
                 slivers: [
-                  // ============================
-                  // HEADER
-                  // ============================
+                  // ==========================
+                  // PAGE HEADER
+                  // ==========================
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
                     sliver: SliverToBoxAdapter(
@@ -654,15 +663,13 @@ class _HomeScreenState extends State<HomeScreen> {
                             isEditing ? 'Редактирование' : 'Мой TruckLink',
                             style: Theme.of(context).textTheme.headlineMedium,
                           ),
-
                           const SizedBox(height: 7),
-
                           Text(
                             isEditing
-                                ? 'Удерживай карточку и '
-                                      'перетащи на место другой. '
-                                      'Нажми крестик, чтобы '
-                                      'убрать её.'
+                                ? 'Удерживай карточку '
+                                      'и перетащи на место '
+                                      'другой. Нажми крестик, '
+                                      'чтобы убрать её.'
                                 : 'Персональная панель '
                                       'телеметрии',
                             style: Theme.of(context).textTheme.bodyMedium,
@@ -672,9 +679,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
 
-                  // ============================
-                  // EMPTY STATE
-                  // ============================
+                  // ==========================
+                  // EMPTY LAYOUT
+                  // ==========================
                   if (metrics.isEmpty)
                     const SliverPadding(
                       padding: EdgeInsets.all(16),
@@ -685,16 +692,12 @@ class _HomeScreenState extends State<HomeScreen> {
                             child: Column(
                               children: [
                                 Icon(Icons.dashboard_outlined, size: 44),
-
                                 SizedBox(height: 12),
-
                                 Text(
                                   'Нет выбранных карточек',
                                   textAlign: TextAlign.center,
                                 ),
-
                                 SizedBox(height: 8),
-
                                 Text(
                                   'Добавь показатели, '
                                   'чтобы они появились '
@@ -707,10 +710,10 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                     )
+                  // ==========================
+                  // METRIC GRID
+                  // ==========================
                   else
-                    // ==========================
-                    // METRIC GRID
-                    // ==========================
                     SliverPadding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       sliver: SliverLayoutBuilder(
@@ -736,9 +739,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   metric: metric,
                                   connection: widget.connection,
                                   isEditing: isEditing,
-                                  onRemove: () {
-                                    _removeMetric(metric);
-                                  },
+                                  onRemove: () => _removeMetric(metric),
                                   onMove: _moveMetric,
                                 );
                               },
@@ -758,6 +759,8 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ),
 
+                  // Leave space for the
+                  // floating navigation pill.
                   const SliverToBoxAdapter(child: SizedBox(height: 32)),
                 ],
               ),
@@ -789,7 +792,7 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 // ============================================
-// HOME GRID ITEM
+// GRID ITEM + DRAG AND DROP
 // ============================================
 
 class _HomeGridItem extends StatelessWidget {
@@ -804,15 +807,18 @@ class _HomeGridItem extends StatelessWidget {
 
   final HomeMetric metric;
   final TelemetryConnection connection;
-  final bool isEditing;
 
+  final bool isEditing;
   final VoidCallback onRemove;
 
   final void Function(HomeMetric source, HomeMetric destination) onMove;
 
   @override
   Widget build(BuildContext context) {
-    // Normal display mode.
+    // ========================================
+    // NORMAL MODE
+    // ========================================
+
     if (!isEditing) {
       return _HomeMetricCard(
         metric: metric,
@@ -821,18 +827,18 @@ class _HomeGridItem extends StatelessWidget {
       );
     }
 
+    // ========================================
+    // EDIT MODE
+    // ========================================
+
     final scheme = Theme.of(context).colorScheme;
 
     return LayoutBuilder(
       builder: (context, constraints) {
         return DragTarget<HomeMetric>(
-          onWillAcceptWithDetails: (details) {
-            return details.data != metric;
-          },
+          onWillAcceptWithDetails: (details) => details.data != metric,
 
-          onAcceptWithDetails: (details) {
-            onMove(details.data, metric);
-          },
+          onAcceptWithDetails: (details) => onMove(details.data, metric),
 
           builder: (context, candidateData, rejectedData) {
             final highlighted = candidateData.isNotEmpty;
@@ -846,12 +852,13 @@ class _HomeGridItem extends StatelessWidget {
                   color: highlighted ? scheme.primary : Colors.transparent,
                 ),
               ),
-
               child: LongPressDraggable<HomeMetric>(
                 data: metric,
                 maxSimultaneousDrags: 1,
 
-                // Preview while dragging.
+                // ========================
+                // DRAG PREVIEW
+                // ========================
                 feedback: Material(
                   color: Colors.transparent,
                   child: SizedBox(
@@ -859,12 +866,20 @@ class _HomeGridItem extends StatelessWidget {
                     height: 158,
                     child: _DraggingPreview(
                       metric: metric,
-                      value: metric.formatValue(connection.snapshot),
+
+                      // NEW:
+                      // Use real active job.
+                      value: metric.formatValue(
+                        connection.snapshot,
+                        activeJob: connection.activeJob,
+                      ),
                     ),
                   ),
                 ),
 
-                // Placeholder left behind.
+                // ========================
+                // PLACEHOLDER
+                // ========================
                 childWhenDragging: Container(
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
@@ -879,6 +894,9 @@ class _HomeGridItem extends StatelessWidget {
                   ),
                 ),
 
+                // ========================
+                // ACTUAL CARD
+                // ========================
                 child: _HomeMetricCard(
                   metric: metric,
                   connection: connection,
@@ -895,7 +913,7 @@ class _HomeGridItem extends StatelessWidget {
 }
 
 // ============================================
-// DRAGGING PREVIEW
+// DRAG PREVIEW
 // ============================================
 
 class _DraggingPreview extends StatelessWidget {
@@ -943,7 +961,7 @@ class _DraggingPreview extends StatelessWidget {
 }
 
 // ============================================
-// LIVE TELEMETRY CARD
+// HOME METRIC CARD
 // ============================================
 
 class _HomeMetricCard extends StatefulWidget {
@@ -956,6 +974,7 @@ class _HomeMetricCard extends StatefulWidget {
 
   final HomeMetric metric;
   final TelemetryConnection connection;
+
   final bool isEditing;
   final VoidCallback? onRemove;
 
@@ -967,7 +986,7 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
   late String _value;
 
   // ==========================================
-  // INITIALIZATION
+  // SUBSCRIBE TO CONNECTION
   // ==========================================
 
   @override
@@ -980,15 +999,22 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
   }
 
   // ==========================================
-  // READ TELEMETRY
+  // READ LATEST CARD VALUE
   // ==========================================
 
   String _readValue() {
-    return widget.metric.formatValue(widget.connection.snapshot);
+    return widget.metric.formatValue(
+      widget.connection.snapshot,
+
+      // NEW:
+      // Cargo, route, reward and remaining
+      // distance are read from activeJob.
+      activeJob: widget.connection.activeJob,
+    );
   }
 
   // ==========================================
-  // UPDATE LISTENER
+  // HANDLE WIDGET UPDATES
   // ==========================================
 
   @override
@@ -1004,13 +1030,18 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
     _value = _readValue();
   }
 
+  // ==========================================
+  // UPDATE ONLY WHEN VALUE CHANGES
+  // ==========================================
+
   void _onUpdate() {
     if (!mounted) return;
 
     final nextValue = _readValue();
 
-    // Rebuild only if formatted value changed.
-    if (nextValue == _value) return;
+    if (nextValue == _value) {
+      return;
+    }
 
     setState(() {
       _value = nextValue;
@@ -1018,12 +1049,13 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
   }
 
   // ==========================================
-  // BUILD
+  // BUILD CARD
   // ==========================================
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+
     final scheme = theme.colorScheme;
 
     return RepaintBoundary(
@@ -1034,9 +1066,9 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ============================
-              // ICON / REMOVE
-              // ============================
+              // ==========================
+              // ICON AND CATEGORY
+              // ==========================
               Row(
                 children: [
                   Icon(widget.metric.icon, size: 23, color: scheme.primary),
@@ -1074,9 +1106,9 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
 
               const SizedBox(height: 8),
 
-              // ============================
-              // TITLE
-              // ============================
+              // ==========================
+              // METRIC TITLE
+              // ==========================
               Text(
                 widget.metric.title,
                 maxLines: 2,
@@ -1086,9 +1118,9 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
 
               const Spacer(),
 
-              // ============================
-              // FORMATTED VALUE
-              // ============================
+              // ==========================
+              // LIVE VALUE
+              // ==========================
               Row(
                 children: [
                   Expanded(
@@ -1121,7 +1153,7 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
   }
 
   // ==========================================
-  // CLEANUP
+  // UNSUBSCRIBE
   // ==========================================
 
   @override

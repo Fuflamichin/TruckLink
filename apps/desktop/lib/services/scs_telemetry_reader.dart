@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -6,21 +7,44 @@ import 'package:telemetry_core/telemetry_core.dart';
 
 import 'scs_shared_memory.dart';
 
-/// Reads real ETS2 / ATS telemetry from Windows Shared Memory.
+// ============================================
+// SCS TELEMETRY READER
+// ============================================
+
+/// Reads ETS2 / ATS telemetry from Windows
+/// shared memory.
 ///
 /// Supported plugin:
 /// truckermudgeon/scs-sdk-plugin
 ///
-/// Supported telemetry layout revision: 12.
+/// Supported memory layout: revision 12.
 class ScsTelemetryReader {
   ScsTelemetryReader({ScsSharedMemory? memory})
     : _memory = memory ?? ScsSharedMemory();
 
   final ScsSharedMemory _memory;
 
-  static const int readSize = 1600;
+  // ==========================================
+  // SHARED MEMORY SIZE
+  // ==========================================
 
-  /// Returns null when the telemetry mapping is absent.
+  /// Earlier versions read only 1600 bytes.
+  ///
+  /// Job strings begin at offset 2300.
+  /// Job income is stored at offset 4000.
+  /// The onJob flag is stored at offset 4300.
+  ///
+  /// Read the complete first 12 zones.
+  ///
+  /// The plugin allocates 32 KiB, so 4400
+  /// bytes is within the mapping capacity.
+  static const int readSize = 4400;
+
+  // ==========================================
+  // READ ONE FRAME
+  // ==========================================
+
+  /// Returns null when shared memory is absent.
   ScsTelemetryFrame? read() {
     final bytes = _memory.readBytes(readSize);
 
@@ -31,7 +55,10 @@ class ScsTelemetryReader {
     return ScsTelemetryFrame.fromBytes(bytes);
   }
 
-  /// Periodically reads telemetry from the game.
+  // ==========================================
+  // WATCH TELEMETRY
+  // ==========================================
+
   Stream<ScsTelemetryFrame?> watch({
     Duration interval = const Duration(milliseconds: 200),
   }) async* {
@@ -47,14 +74,183 @@ class ScsTelemetryReader {
   }
 }
 
-/// Represents one complete sample of truck telemetry.
+// ============================================
+// REAL SCS JOB DATA
+// ============================================
+
+/// One active ETS2 / ATS job.
 ///
-/// Units:
-/// - Speed: km/h
-/// - Fuel: liters
-/// - Odometer: km
-/// - Temperature: Celsius
-/// - Engine wear: fraction (0.0 - 1.0)
+/// These values come from the SCS plugin's
+/// revision-12 memory layout.
+///
+/// This model is local to the Windows reader.
+/// Mobile protocol integration is the next step.
+class ScsJobFrame {
+  const ScsJobFrame({
+    required this.cargoName,
+    required this.cargoId,
+    required this.sourceCity,
+    required this.sourceCityId,
+    required this.destinationCity,
+    required this.destinationCityId,
+    required this.sourceCompany,
+    required this.sourceCompanyId,
+    required this.destinationCompany,
+    required this.destinationCompanyId,
+    required this.jobMarket,
+    required this.income,
+    required this.plannedDistanceKm,
+    required this.cargoMassKg,
+    required this.unitCount,
+    required this.unitMassKg,
+    required this.cargoDamage,
+    required this.cargoLoaded,
+    required this.specialJob,
+    required this.deliveryTimeAbsoluteMinutes,
+    required this.gameTimeAbsoluteMinutes,
+    required this.navigationDistanceMeters,
+    required this.navigationTimeSeconds,
+  });
+
+  // ==========================================
+  // CARGO
+  // ==========================================
+
+  final String cargoName;
+  final String cargoId;
+
+  final double? cargoMassKg;
+  final int unitCount;
+  final double? unitMassKg;
+
+  /// Damage fraction, typically 0.0 - 1.0.
+  final double? cargoDamage;
+
+  final bool cargoLoaded;
+  final bool specialJob;
+
+  // ==========================================
+  // SOURCE
+  // ==========================================
+
+  final String sourceCity;
+  final String sourceCityId;
+
+  final String sourceCompany;
+  final String sourceCompanyId;
+
+  // ==========================================
+  // DESTINATION
+  // ==========================================
+
+  final String destinationCity;
+  final String destinationCityId;
+
+  final String destinationCompany;
+  final String destinationCompanyId;
+
+  // ==========================================
+  // JOB DETAILS
+  // ==========================================
+
+  final String jobMarket;
+
+  /// Reward in the game's currency.
+  ///
+  /// ETS2 normally uses EUR, ATS uses USD,
+  /// but the actual in-game currency may
+  /// depend on user settings.
+  final int income;
+
+  /// Original planned job distance in km.
+  final int plannedDistanceKm;
+
+  // ==========================================
+  // IN-GAME TIME
+  // ==========================================
+
+  /// Absolute game time in minutes.
+  /// This is not a Unix timestamp.
+  final int gameTimeAbsoluteMinutes;
+
+  /// Absolute in-game delivery deadline,
+  /// measured in game minutes.
+  final int deliveryTimeAbsoluteMinutes;
+
+  // ==========================================
+  // LIVE NAVIGATION
+  // ==========================================
+
+  /// Route advisor distance in meters.
+  final double? navigationDistanceMeters;
+
+  /// Route advisor time in seconds.
+  final double? navigationTimeSeconds;
+
+  // ==========================================
+  // CALCULATED PROPERTIES
+  // ==========================================
+
+  double? get navigationDistanceKm {
+    final value = navigationDistanceMeters;
+
+    if (value == null) {
+      return null;
+    }
+
+    return value / 1000.0;
+  }
+
+  double? get cargoMassTonnes {
+    final value = cargoMassKg;
+
+    if (value == null) {
+      return null;
+    }
+
+    return value / 1000.0;
+  }
+
+  double? get cargoDamagePercent {
+    final value = cargoDamage;
+
+    if (value == null) {
+      return null;
+    }
+
+    return (value * 100).clamp(0.0, 100.0).toDouble();
+  }
+
+  /// Remaining delivery time in in-game minutes.
+  ///
+  /// This is not real-world wall-clock time.
+  int? get remainingDeliveryMinutes {
+    if (deliveryTimeAbsoluteMinutes <= 0) {
+      return null;
+    }
+
+    final remaining = deliveryTimeAbsoluteMinutes - gameTimeAbsoluteMinutes;
+
+    return remaining < 0 ? 0 : remaining;
+  }
+
+  String get displayCargo {
+    return cargoName.isEmpty ? 'Неизвестный груз' : cargoName;
+  }
+
+  String get displayRoute {
+    final start = sourceCity.isEmpty ? 'Неизвестно' : sourceCity;
+
+    final end = destinationCity.isEmpty ? 'Неизвестно' : destinationCity;
+
+    return '$start → $end';
+  }
+}
+
+// ============================================
+// COMPLETE SCS TELEMETRY FRAME
+// ============================================
+
 class ScsTelemetryFrame {
   const ScsTelemetryFrame({
     required this.pluginRevision,
@@ -76,14 +272,16 @@ class ScsTelemetryFrame {
     required this.engineWear,
     required this.cruiseControlKmh,
     required this.speedLimitKmh,
+    this.job,
   });
-
-  static const int supportedRevision = 12;
-  static const int minimumBytes = 1577;
 
   // ==========================================
   // PLUGIN INFORMATION
   // ==========================================
+
+  static const int supportedRevision = 12;
+
+  static const int minimumBytes = 4400;
 
   final int pluginRevision;
   final int gameId;
@@ -129,6 +327,15 @@ class ScsTelemetryFrame {
   final double speedLimitKmh;
 
   // ==========================================
+  // NEW: CURRENT JOB
+  // ==========================================
+
+  /// Null when the plugin reports onJob = false.
+  final ScsJobFrame? job;
+
+  bool get hasActiveJob => job != null;
+
+  // ==========================================
   // CALCULATED PROPERTIES
   // ==========================================
 
@@ -153,25 +360,22 @@ class ScsTelemetryFrame {
   }
 
   // ==========================================
-  // CONVERT TO TRUCKLINK MODEL
+  // CONVERT TO TRUCKLINK SNAPSHOT
   // ==========================================
 
-  /// Converts the SCS SDK telemetry into the shared
-  /// TruckSnapshot model used by Windows and mobile.
+  /// Preserve the existing mobile protocol.
   ///
-  /// The plugin timestamp is not a Unix timestamp.
-  /// We use the local UTC sampling time instead.
-  ///
-  /// Invalid optional floating-point values are
-  /// converted to null to keep JSON serialization safe.
+  /// ScsJobFrame is not converted to the shared
+  /// Job model yet. That belongs to v0.7.2.
   TruckSnapshot toTruckSnapshot() {
     double? finiteOrNull(double value) {
       return value.isFinite ? value : null;
     }
 
     return TruckSnapshot(
-      // Core telemetry
       timestamp: DateTime.now().toUtc(),
+
+      // Core telemetry.
       speedKmh: speedKmh,
       rpm: rpm,
       gear: gear,
@@ -179,44 +383,52 @@ class ScsTelemetryFrame {
       fuelCapacityLiters: fuelCapacityLiters,
       engineOn: engineOn,
 
-      // Extended engine telemetry
+      // Extended engine telemetry.
       maxRpm: finiteOrNull(maxRpm),
       waterTemperatureC: finiteOrNull(waterTemperatureC),
 
-      // Truck condition
+      // Truck condition.
       odometerKm: finiteOrNull(odometerKm),
       engineWear: finiteOrNull(engineWear),
 
-      // Driving assistance
+      // Driving assistance.
       cruiseControlKmh: finiteOrNull(cruiseControlKmh),
       speedLimitKmh: finiteOrNull(speedLimitKmh),
 
-      // Additional vehicle state
+      // Vehicle state.
       parkBrake: parkBrake,
       dashboardGear: dashboardGear,
 
-      // Job information will be added separately.
+      // Job protocol integration is v0.7.2.
       job: null,
     );
   }
 
   // ==========================================
-  // BINARY DECODING
+  // DECODE REVISION 12
   // ==========================================
 
-  /// Decodes revision 12 of scsTelemetryMap_t.
   factory ScsTelemetryFrame.fromBytes(Uint8List bytes) {
     if (bytes.length < minimumBytes) {
       throw FormatException(
         'Telemetry buffer too small: '
-        '${bytes.length} bytes',
+        '${bytes.length} bytes. '
+        'Expected at least $minimumBytes.',
       );
     }
 
     final data = ByteData.sublistView(bytes);
 
+    // ========================================
+    // LOW-LEVEL READ HELPERS
+    // ========================================
+
     int uint32(int offset) {
       return data.getUint32(offset, Endian.little);
+    }
+
+    int uint64(int offset) {
+      return data.getUint64(offset, Endian.little);
     }
 
     int int32(int offset) {
@@ -231,6 +443,38 @@ class ScsTelemetryFrame {
       return bytes[offset] != 0;
     }
 
+    double? nonNegativeFiniteFloat(int offset) {
+      final value = float32(offset);
+
+      if (!value.isFinite || value < 0) {
+        return null;
+      }
+
+      return value;
+    }
+
+    // ========================================
+    // NULL-TERMINATED UTF-8 STRING
+    // ========================================
+
+    String readString(int offset, int maxLength) {
+      final end = offset + maxLength;
+
+      var stringEnd = offset;
+
+      while (stringEnd < end && bytes[stringEnd] != 0) {
+        stringEnd++;
+      }
+
+      if (stringEnd == offset) {
+        return '';
+      }
+
+      final stringBytes = Uint8List.sublistView(bytes, offset, stringEnd);
+
+      return utf8.decode(stringBytes, allowMalformed: true).trim();
+    }
+
     // ========================================
     // PLUGIN HEADER
     // ========================================
@@ -240,7 +484,8 @@ class ScsTelemetryFrame {
     if (revision != supportedRevision) {
       throw UnsupportedError(
         'Unsupported telemetry revision: '
-        '$revision. Expected: $supportedRevision.',
+        '$revision. '
+        'Expected: $supportedRevision.',
       );
     }
 
@@ -254,8 +499,7 @@ class ScsTelemetryFrame {
     // CORE DATA
     // ========================================
 
-    // SCS SDK speed values are in m/s.
-    // Convert to km/h.
+    // SCS speed values are in m/s.
     final speedKmh = float32(948) * 3.6;
 
     final rpm = float32(952);
@@ -290,55 +534,149 @@ class ScsTelemetryFrame {
     }
 
     // ========================================
-    // BUILD FRAME
+    // NEW: READ ACTIVE JOB
+    // ========================================
+
+    ScsJobFrame? currentJob;
+
+    // Revision-12 special_b.onJob:
+    // offset 4300.
+    //
+    // Do not infer an active job from old
+    // cargo strings or the reward amount:
+    // those fields may remain populated
+    // temporarily after a delivery.
+    final onJob = boolean(4300);
+
+    if (onJob) {
+      currentJob = ScsJobFrame(
+        // ================================
+        // CARGO
+        // ================================
+        cargoId: readString(2556, 64),
+        cargoName: readString(2620, 64),
+
+        cargoMassKg: nonNegativeFiniteFloat(748),
+
+        unitCount: uint32(96),
+
+        unitMassKg: nonNegativeFiniteFloat(944),
+
+        cargoDamage: nonNegativeFiniteFloat(1468),
+
+        cargoLoaded: boolean(1564),
+        specialJob: boolean(1565),
+
+        // ================================
+        // DESTINATION
+        // ================================
+        destinationCityId: readString(2684, 64),
+
+        destinationCity: readString(2748, 64),
+
+        destinationCompanyId: readString(2812, 64),
+
+        destinationCompany: readString(2876, 64),
+
+        // ================================
+        // SOURCE
+        // ================================
+        sourceCityId: readString(2940, 64),
+
+        sourceCity: readString(3004, 64),
+
+        sourceCompanyId: readString(3068, 64),
+
+        sourceCompany: readString(3132, 64),
+
+        // ================================
+        // JOB MARKET
+        // ================================
+        jobMarket: readString(3404, 32),
+
+        // ================================
+        // REWARD / PLANNED ROUTE
+        // ================================
+        income: uint64(4000),
+
+        plannedDistanceKm: uint32(100),
+
+        // ================================
+        // GAME CLOCK / DEADLINE
+        // ================================
+        gameTimeAbsoluteMinutes: uint32(64),
+
+        deliveryTimeAbsoluteMinutes: uint32(88),
+
+        // ================================
+        // LIVE NAVIGATION
+        // ================================
+
+        // Route advisor distance in meters.
+        navigationDistanceMeters: nonNegativeFiniteFloat(1060),
+
+        // Route advisor ETA in seconds.
+        navigationTimeSeconds: nonNegativeFiniteFloat(1064),
+      );
+    }
+
+    // ========================================
+    // BUILD COMPLETE FRAME
     // ========================================
 
     return ScsTelemetryFrame(
       pluginRevision: revision,
       gameId: gameId,
 
-      timestamp: data.getUint64(8, Endian.little),
+      timestamp: uint64(8),
 
       sdkActive: boolean(0),
       paused: boolean(4),
 
-      // Transmission
+      // Transmission.
       gear: int32(504),
       dashboardGear: int32(508),
 
-      // Engine
+      // Engine.
       speedKmh: speedKmh,
       rpm: rpm,
       maxRpm: float32(740),
       engineOn: boolean(1576),
 
-      // Brakes
+      // Brakes.
       parkBrake: boolean(1566),
 
-      // Fuel
+      // Fuel.
       fuelLiters: fuel,
       fuelCapacityLiters: fuelCapacity,
 
-      // Vehicle condition
+      // Vehicle condition.
       odometerKm: float32(1056),
       waterTemperatureC: float32(1024),
       engineWear: float32(1036),
 
-      // Driving assistance
+      // Driving assistance.
       cruiseControlKmh: float32(988) * 3.6,
 
       speedLimitKmh: float32(1068) * 3.6,
+
+      // New active job data.
+      job: currentJob,
     );
   }
 }
 
 // ============================================
-// CONSOLE DIAGNOSTICS
+// CONSOLE DIAGNOSTIC
 // ============================================
 
 /// Run from apps/desktop:
 ///
 /// dart run lib/services/scs_telemetry_reader.dart
+///
+/// This diagnostic reads data directly from
+/// the plugin without requiring Windows Hub's
+/// WebSocket server or the Android application.
 Future<void> main() async {
   if (!Platform.isWindows) {
     stderr.writeln('TruckLink telemetry requires Windows.');
@@ -349,42 +687,46 @@ Future<void> main() async {
 
   final reader = ScsTelemetryReader();
 
-  stdout.writeln('===================================');
+  stdout.writeln('========================================');
 
-  stdout.writeln(' TruckLink - Extended Telemetry');
+  stdout.writeln(' TruckLink v0.7.1 - Job Telemetry');
 
-  stdout.writeln('===================================');
+  stdout.writeln('========================================');
 
-  stdout.writeln('Start ETS2 and enter your truck.');
+  stdout.writeln('Запусти ETS2 или ATS и загрузи профиль.');
 
-  stdout.writeln('Press Ctrl+C to stop.');
+  stdout.writeln('Прими заказ для проверки его полей.');
+
+  stdout.writeln('Нажми Ctrl+C для завершения.');
 
   stdout.writeln();
 
   int? previousTimestamp;
+  bool? previousJobState;
 
   try {
     await for (final frame in reader.watch(
       interval: const Duration(seconds: 1),
     )) {
       if (frame == null) {
+        if (previousTimestamp != null || previousJobState != false) {
+          stdout.writeln('[WAITING] Shared memory недоступна.');
+        }
+
         previousTimestamp = null;
-
-        stdout.writeln('[WAITING] SCS Plugin not found.');
-
+        previousJobState = false;
         continue;
       }
 
       if (!frame.sdkActive) {
+        stdout.writeln('[WAITING] SDK обнаружен, но не активен.');
+
         previousTimestamp = null;
-
-        stdout.writeln('[WAITING] SDK not active.');
-
         continue;
       }
 
       if (frame.paused) {
-        stdout.writeln('[PAUSED] Telemetry paused.');
+        stdout.writeln('[PAUSED] Игра на паузе.');
 
         continue;
       }
@@ -393,78 +735,99 @@ Future<void> main() async {
 
       previousTimestamp = frame.timestamp;
 
-      final snapshot = frame.toTruckSnapshot();
+      final job = frame.job;
 
-      stdout.writeln('-----------------------------------');
+      if (job == null) {
+        if (previousJobState != false) {
+          stdout.writeln('----------------------------------------');
+
+          stdout.writeln('Game: ${frame.gameName}');
+
+          stdout.writeln('[NO JOB] Активного заказа нет.');
+        }
+
+        previousJobState = false;
+        continue;
+      }
+
+      if (previousJobState != true) {
+        stdout.writeln('[JOB STARTED] Обнаружена перевозка.');
+      }
+
+      previousJobState = true;
+
+      stdout.writeln('----------------------------------------');
 
       stdout.writeln('Game: ${frame.gameName}');
 
       stdout.writeln('Revision: ${frame.pluginRevision}');
 
-      stdout.writeln('Data changed: ${changed ? "YES" : "NO"}');
-
       stdout.writeln(
-        'Speed: '
-        '${snapshot.speedKmh.toStringAsFixed(1)} km/h',
+        'Telemetry updating: '
+        '${changed ? "YES" : "NO"}',
       );
 
-      stdout.writeln('RPM: ${snapshot.rpm.toStringAsFixed(0)}');
+      stdout.writeln();
 
-      stdout.writeln('Gear: ${snapshot.gear}');
+      stdout.writeln('Cargo: ${job.displayCargo}');
+
+      stdout.writeln('Cargo ID: ${job.cargoId}');
+
+      stdout.writeln('Route: ${job.displayRoute}');
+
+      stdout.writeln('Source company: ${job.sourceCompany}');
 
       stdout.writeln(
-        'Dashboard gear: '
-        '${snapshot.dashboardGear}',
+        'Destination company: '
+        '${job.destinationCompany}',
       );
 
-      stdout.writeln(
-        'Engine: '
-        '${snapshot.engineOn ? "ON" : "OFF"}',
-      );
+      stdout.writeln('Market: ${job.jobMarket}');
+
+      stdout.writeln('Reward: ${job.income}');
 
       stdout.writeln(
-        'Fuel: '
-        '${snapshot.fuelLiters.toStringAsFixed(1)} L '
-        '/ '
-        '${snapshot.fuelCapacityLiters.toStringAsFixed(1)} L',
+        'Planned distance: '
+        '${job.plannedDistanceKm} km',
       );
 
-      stdout.writeln(
-        'Fuel percent: '
-        '${snapshot.fuelPercent.toStringAsFixed(1)}%',
-      );
+      final remainingKm = job.navigationDistanceKm;
 
       stdout.writeln(
-        'Odometer: '
-        '${snapshot.odometerKm?.toStringAsFixed(1) ?? "N/A"} km',
+        'Navigation remaining: '
+        '${remainingKm?.toStringAsFixed(1) ?? "N/A"} km',
       );
 
-      stdout.writeln(
-        'Water temperature: '
-        '${snapshot.waterTemperatureC?.toStringAsFixed(1) ?? "N/A"} C',
-      );
+      final routeSeconds = job.navigationTimeSeconds;
 
       stdout.writeln(
-        'Engine wear: '
-        '${snapshot.engineWearPercent?.toStringAsFixed(1) ?? "N/A"}%',
+        'Navigation ETA: '
+        '${routeSeconds?.toStringAsFixed(0) ?? "N/A"} s',
       );
 
       stdout.writeln(
-        'Cruise control: '
-        '${snapshot.cruiseControlKmh?.toStringAsFixed(1) ?? "N/A"} km/h',
+        'Cargo mass: '
+        '${job.cargoMassKg?.toStringAsFixed(0) ?? "N/A"} kg',
       );
 
       stdout.writeln(
-        'Speed limit: '
-        '${snapshot.speedLimitKmh?.toStringAsFixed(1) ?? "N/A"} km/h',
+        'Cargo damage: '
+        '${job.cargoDamagePercent?.toStringAsFixed(1) ?? "N/A"}%',
+      );
+
+      stdout.writeln('Cargo loaded: ${job.cargoLoaded}');
+
+      stdout.writeln('Special job: ${job.specialJob}');
+
+      stdout.writeln(
+        'Delivery deadline (game minutes): '
+        '${job.deliveryTimeAbsoluteMinutes}',
       );
 
       stdout.writeln(
-        'Parking brake: '
-        '${snapshot.parkBrake == true ? "ON" : "OFF"}',
+        'Remaining delivery (game minutes): '
+        '${job.remainingDeliveryMinutes ?? "N/A"}',
       );
-
-      stdout.writeln('===================================');
     }
   } on UnsupportedError catch (error) {
     stderr.writeln('[UNSUPPORTED] $error');
