@@ -8,10 +8,12 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:network_protocol/network_protocol.dart';
 import 'package:network_protocol/job_protocol.dart';
+import 'package:network_protocol/job_lifecycle_protocol.dart';
 import 'package:telemetry_core/telemetry_core.dart';
 import 'package:telemetry_core/job_telemetry.dart';
 
 import 'services/scs_job_bridge.dart';
+import 'services/scs_job_lifecycle_tracker.dart';
 import 'services/scs_plugin_detector.dart';
 import 'services/scs_telemetry_reader.dart';
 
@@ -54,7 +56,10 @@ class _ConnectedDevice {
   final String? deviceName;
   final String? platform;
 
-  _ConnectedDevice withIdentity(String name, String platformName) {
+  _ConnectedDevice withIdentity({
+    required String name,
+    required String platformName,
+  }) {
     return _ConnectedDevice(
       ipAddress: ipAddress,
       connectedAt: connectedAt,
@@ -63,18 +68,22 @@ class _ConnectedDevice {
     );
   }
 
-  String get displayName =>
-      deviceName?.isNotEmpty == true ? deviceName! : 'Устройство $ipAddress';
+  String get displayName {
+    final name = deviceName;
+    return name == null || name.isEmpty ? 'Устройство $ipAddress' : name;
+  }
 
   String get timeText {
     final h = connectedAt.hour.toString().padLeft(2, '0');
+
     final m = connectedAt.minute.toString().padLeft(2, '0');
+
     return '$h:$m';
   }
 }
 
 // ============================================
-// DESKTOP HOME
+// WINDOWS HUB HOME
 // ============================================
 
 class DesktopHome extends StatefulWidget {
@@ -85,12 +94,17 @@ class DesktopHome extends StatefulWidget {
 }
 
 class _DesktopHomeState extends State<DesktopHome> {
-  static const Color _accent = Color(0xFF10EF78);
-  static const Color _warning = Color(0xFFFFBA63);
-  static const Color _muted = Color(0xFF9BAAB9);
-  static const Color _surface = Color(0xFF15232F);
+  // ==========================================
+  // THEME
+  // ==========================================
 
-  static const int serverPort = 8787;
+  static const Color _accent = Color(0xFF10EF78);
+
+  static const Color _warning = Color(0xFFFFBA63);
+
+  static const Color _muted = Color(0xFF9BAAB9);
+
+  static const Color _surface = Color(0xFF15232F);
 
   // ==========================================
   // TELEMETRY
@@ -106,11 +120,22 @@ class _DesktopHomeState extends State<DesktopHome> {
   int? _lastTimestamp;
   DateTime? _lastFrameAt;
 
-  bool _sharedMemoryAvailable = false;
   bool _telemetryActive = false;
+  bool _sharedMemoryAvailable = false;
 
   String? _gameName;
   String _gameStatus = 'Ожидание ETS2 / ATS';
+
+  // ==========================================
+  // JOB LIFECYCLE
+  // ==========================================
+
+  final ScsJobLifecycleTracker _jobLifecycle = ScsJobLifecycleTracker();
+
+  DateTime? _lastJobBroadcastAt;
+  String? _lastJobBroadcastKey;
+
+  static const Duration _jobBroadcastInterval = Duration(seconds: 1);
 
   // ==========================================
   // PLUGIN DETECTOR
@@ -126,6 +151,8 @@ class _DesktopHomeState extends State<DesktopHome> {
   // ==========================================
   // WEBSOCKET
   // ==========================================
+
+  static const int serverPort = 8787;
 
   HttpServer? _server;
 
@@ -165,7 +192,30 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // CLEAR TELEMETRY
+  // JOB IDENTITY
+  // ==========================================
+
+  // Fields that identify the delivery.
+  // Changing GPS distance does not make
+  // it a different job.
+  String _jobKey(TruckLinkJobTelemetry? job) {
+    if (job == null) {
+      return '<no-job>';
+    }
+
+    return [
+      job.gameId,
+      job.cargoId,
+      job.sourceCity,
+      job.destinationCity,
+      job.sourceCompany,
+      job.destinationCompany,
+      job.income,
+    ].join('|');
+  }
+
+  // ==========================================
+  // TELEMETRY UNAVAILABLE
   // ==========================================
 
   void _setTelemetryUnavailable(
@@ -195,7 +245,6 @@ class _DesktopHomeState extends State<DesktopHome> {
     _gameName = gameName;
     _gameStatus = status;
 
-    // Tell Android to remove the old job.
     if (hadJob) {
       _broadcastJob(null);
     }
@@ -211,9 +260,9 @@ class _DesktopHomeState extends State<DesktopHome> {
 
   void _markTelemetryStale(String? gameName) {
     final changed =
-        _telemetryActive ||
         _snapshot != null ||
         _activeJob != null ||
+        _telemetryActive ||
         _gameStatus != 'Нет новых данных от игры';
 
     final hadJob = _activeJob != null;
@@ -227,9 +276,9 @@ class _DesktopHomeState extends State<DesktopHome> {
     _gameName = gameName;
     _gameStatus = 'Нет новых данных от игры';
 
-    // Keep _lastTimestamp unchanged.
-    // Otherwise the same old frame would
-    // repeatedly appear as fresh.
+    // Do not reset _lastTimestamp.
+    // Otherwise a frozen frame would
+    // repeatedly look fresh.
     if (hadJob) {
       _broadcastJob(null);
     }
@@ -240,7 +289,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // READ GAME TELEMETRY
+  // READ SCS TELEMETRY
   // ==========================================
 
   void _readTelemetry() {
@@ -250,6 +299,8 @@ class _DesktopHomeState extends State<DesktopHome> {
       final frame = _reader.read();
 
       if (frame == null) {
+        _jobLifecycle.reset();
+
         _setTelemetryUnavailable('Ожидание запуска игры');
         return;
       }
@@ -261,6 +312,8 @@ class _DesktopHomeState extends State<DesktopHome> {
       };
 
       if (!frame.sdkActive) {
+        _jobLifecycle.reset();
+
         _setTelemetryUnavailable(
           'SDK обнаружен, но не активен',
           gameName: gameName,
@@ -269,12 +322,34 @@ class _DesktopHomeState extends State<DesktopHome> {
         return;
       }
 
+      // ======================================
+      // TRACK SDK JOB EVENTS
+      // ======================================
+
+      // Observe on every poll, even when
+      // the regular timestamp is unchanged.
+      final event = _jobLifecycle.observe(
+        gameId: frame.gameId,
+        onJob: frame.hasActiveJob,
+        deliveredFlag: frame.jobDeliveredEventFlag,
+        cancelledFlag: frame.jobCancelledEventFlag,
+      );
+
+      // ======================================
+      // PAUSE / WAITING
+      // ======================================
+
       if (frame.paused) {
         _setTelemetryUnavailable(
           'Игра на паузе',
           gameName: gameName,
           mappingAvailable: true,
         );
+
+        if (event != null) {
+          _broadcastJobEvent(event);
+        }
+
         return;
       }
 
@@ -289,39 +364,75 @@ class _DesktopHomeState extends State<DesktopHome> {
 
       final now = DateTime.now();
 
-      if (_lastTimestamp != frame.timestamp) {
+      final hasNewTimestamp = _lastTimestamp != frame.timestamp;
+
+      // ======================================
+      // CURRENT JOB
+      // ======================================
+
+      final nextJob = jobTelemetryFromScs(frame);
+
+      final jobChanged = _jobKey(nextJob) != _jobKey(_activeJob);
+
+      // ======================================
+      // UPDATE TRUCK SNAPSHOT
+      // ======================================
+
+      if (hasNewTimestamp) {
         _lastTimestamp = frame.timestamp;
         _lastFrameAt = now;
 
-        // Existing truck data.
         _snapshot = frame.toTruckSnapshot();
-
-        // NEW: actual job data.
-        _activeJob = jobTelemetryFromScs(frame);
-
-        final updateUi =
-            !_telemetryActive ||
-            !_sharedMemoryAvailable ||
-            _gameName != gameName ||
-            _gameStatus != 'Телеметрия активна';
-
-        _telemetryActive = true;
-        _sharedMemoryAvailable = true;
-        _gameName = gameName;
-        _gameStatus = 'Телеметрия активна';
-
-        // Existing snapshot protocol.
-        _broadcastSnapshot();
-
-        // New optional job message.
-        _broadcastJob(_activeJob);
-
-        if (updateUi && mounted) {
-          setState(() {});
-        }
-
-        return;
       }
+
+      // Always keep the newest job reference.
+      _activeJob = nextJob;
+
+      final updateUi =
+          !_telemetryActive ||
+          !_sharedMemoryAvailable ||
+          _gameName != gameName ||
+          _gameStatus != 'Телеметрия активна';
+
+      _telemetryActive = true;
+      _sharedMemoryAvailable = true;
+
+      _gameName = gameName;
+      _gameStatus = 'Телеметрия активна';
+
+      // ======================================
+      // EXISTING SNAPSHOT PROTOCOL
+      // ======================================
+
+      if (hasNewTimestamp) {
+        _broadcastSnapshot();
+      }
+
+      // ======================================
+      // JOB UPDATE PROTOCOL
+      // ======================================
+
+      if (hasNewTimestamp || jobChanged || event != null) {
+        _broadcastJob(nextJob);
+      }
+
+      // ======================================
+      // JOB LIFECYCLE EVENT
+      // ======================================
+
+      // Send after job_update, so the
+      // phone has the latest job state.
+      if (event != null) {
+        _broadcastJobEvent(event);
+      }
+
+      if (updateUi && mounted) {
+        setState(() {});
+      }
+
+      // ======================================
+      // STALE TELEMETRY CHECK
+      // ======================================
 
       final lastFrame = _lastFrameAt;
 
@@ -330,12 +441,93 @@ class _DesktopHomeState extends State<DesktopHome> {
         _markTelemetryStale(gameName);
       }
     } catch (error) {
+      _jobLifecycle.reset();
+
       _setTelemetryUnavailable('Ошибка чтения: $error');
     }
   }
 
   // ==========================================
-  // SCAN PLUGIN
+  // BROADCAST TRUCK SNAPSHOT
+  // ==========================================
+
+  void _broadcastSnapshot() {
+    final snapshot = _snapshot;
+
+    if (_server == null || snapshot == null) {
+      return;
+    }
+
+    final message = encodeSnapshot(snapshot);
+
+    _sendToAll(message);
+  }
+
+  // ==========================================
+  // BROADCAST JOB UPDATE
+  // ==========================================
+
+  void _broadcastJob(TruckLinkJobTelemetry? job) {
+    if (_server == null) return;
+
+    final now = DateTime.now();
+    final key = _jobKey(job);
+
+    final isDifferentJob = key != _lastJobBroadcastKey;
+
+    final lastSent = _lastJobBroadcastAt;
+
+    final intervalElapsed =
+        lastSent == null || now.difference(lastSent) >= _jobBroadcastInterval;
+
+    // No need to resend an unchanged null job.
+    if (!isDifferentJob && job == null) {
+      return;
+    }
+
+    // Active jobs update at most once
+    // per second, unless the job changed.
+    if (!isDifferentJob && !intervalElapsed) {
+      return;
+    }
+
+    _lastJobBroadcastKey = key;
+    _lastJobBroadcastAt = now;
+
+    _sendToAll(encodeJobUpdate(job));
+  }
+
+  // ==========================================
+  // BROADCAST JOB EVENT
+  // ==========================================
+
+  void _broadcastJobEvent(JobLifecycleEventKind event) {
+    if (_server == null) return;
+
+    debugPrint('TruckLink: job event ${event.name}');
+
+    _sendToAll(encodeJobEvent(event));
+  }
+
+  // ==========================================
+  // SEND TEXT TO ALL CLIENTS
+  // ==========================================
+
+  void _sendToAll(String message) {
+    if (_server == null) return;
+
+    for (final socket in _clients.keys.toList()) {
+      try {
+        socket.add(message);
+      } catch (error) {
+        debugPrint('TruckLink send error: $error');
+        _removeClient(socket);
+      }
+    }
+  }
+
+  // ==========================================
+  // CHECK PLUGIN INSTALLATION
   // ==========================================
 
   Future<void> _checkPlugin() async {
@@ -354,7 +546,7 @@ class _DesktopHomeState extends State<DesktopHome> {
         _pluginReport = report;
       });
     } catch (error) {
-      debugPrint('TruckLink plugin scan: $error');
+      debugPrint('TruckLink plugin scan error: $error');
 
       if (!mounted) return;
 
@@ -371,7 +563,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // LOCAL IP
+  // DETECT LOCAL IP
   // ==========================================
 
   Future<void> _detectLocalIp() async {
@@ -381,17 +573,17 @@ class _DesktopHomeState extends State<DesktopHome> {
         includeLoopback: false,
       );
 
-      final addresses = [
+      final addresses = <String>[
         for (final interface in interfaces)
           for (final address in interface.addresses) address.address,
       ];
 
-      bool isPrivate(String address) {
-        if (address.startsWith('192.168.') || address.startsWith('10.')) {
+      bool isPrivate(String value) {
+        if (value.startsWith('192.168.') || value.startsWith('10.')) {
           return true;
         }
 
-        final parts = address.split('.');
+        final parts = value.split('.');
 
         if (parts.length != 4 || parts[0] != '172') {
           return false;
@@ -421,15 +613,17 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   String get _serverAddress {
-    if (_localIp == null) {
+    final ip = _localIp;
+
+    if (ip == null) {
       return 'IP компьютера · порт $serverPort';
     }
 
-    return 'ws://$_localIp:$serverPort';
+    return 'ws://$ip:$serverPort';
   }
 
   // ==========================================
-  // START SERVER
+  // START WEBSOCKET SERVER
   // ==========================================
 
   Future<void> _startServer() async {
@@ -451,12 +645,16 @@ class _DesktopHomeState extends State<DesktopHome> {
       }
 
       _server = server;
-      _serverStatus = 'Сервер запущен';
+
+      setState(() {
+        _serverStatus = 'Сервер запущен';
+      });
 
       server.listen(
         (request) async {
           if (!WebSocketTransformer.isUpgradeRequest(request)) {
             request.response.statusCode = HttpStatus.badRequest;
+
             await request.response.close();
             return;
           }
@@ -477,16 +675,28 @@ class _DesktopHomeState extends State<DesktopHome> {
               connectedAt: DateTime.now(),
             );
 
-            // Snapshot on initial connection.
+            // ==================================
+            // SEND CURRENT STATE TO NEW PHONE
+            // ==================================
+
             final snapshot = _snapshot;
 
             if (snapshot != null) {
               socket.add(encodeSnapshot(snapshot));
             }
 
-            // NEW: initial job state, even if
-            // the game currently has no job.
+            // The job message is sent even
+            // when there is no active job.
             socket.add(encodeJobUpdate(_activeJob));
+
+            // Lifecycle events are NOT replayed
+            // to newly connected clients.
+            // Otherwise an old delivery could
+            // look like a new one.
+
+            // ==================================
+            // LISTEN FOR CLIENT HELLO
+            // ==================================
 
             socket.listen(
               (dynamic message) {
@@ -505,11 +715,14 @@ class _DesktopHomeState extends State<DesktopHome> {
               setState(() {});
             }
           } catch (error) {
-            debugPrint('TruckLink WebSocket handshake: $error');
+            debugPrint(
+              'TruckLink WebSocket handshake: '
+              '$error',
+            );
           }
         },
         onError: (Object error) {
-          debugPrint('TruckLink WebSocket server: $error');
+          debugPrint('TruckLink server error: $error');
         },
         onDone: () {
           if (!mounted || !identical(_server, server)) {
@@ -525,9 +738,17 @@ class _DesktopHomeState extends State<DesktopHome> {
 
       unawaited(_detectLocalIp());
     } on SocketException catch (error) {
-      _serverStatus = 'Ошибка запуска: $error';
+      if (mounted) {
+        setState(() {
+          _serverStatus = 'Ошибка запуска: $error';
+        });
+      }
     } catch (error) {
-      _serverStatus = 'Ошибка запуска: $error';
+      if (mounted) {
+        setState(() {
+          _serverStatus = 'Ошибка запуска: $error';
+        });
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -567,73 +788,44 @@ class _DesktopHomeState extends State<DesktopHome> {
           ? _cleanLabel(rawPlatform, 20)
           : '';
 
-      final existing = _clients[socket];
+      final previous = _clients[socket];
 
-      if (existing == null) return;
+      if (previous == null) return;
 
-      _clients[socket] = existing.withIdentity(name, platform);
+      if (previous.deviceName == name && previous.platform == platform) {
+        return;
+      }
+
+      _clients[socket] = previous.withIdentity(
+        name: name,
+        platformName: platform,
+      );
+
+      debugPrint(
+        'TruckLink: identified '
+        '$name (${previous.ipAddress})',
+      );
 
       if (mounted) {
         setState(() {});
       }
     } on FormatException {
-      // Ignore invalid JSON.
+      // Ignore malformed client JSON.
     } catch (error) {
-      debugPrint('TruckLink client hello: $error');
+      debugPrint(
+        'TruckLink client message error: '
+        '$error',
+      );
     }
   }
 
-  String _cleanLabel(String value, int limit) {
-    final cleaned = value
+  String _cleanLabel(String value, int maxLength) {
+    final result = value
         .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
 
-    if (cleaned.length <= limit) {
-      return cleaned;
-    }
-
-    return cleaned.substring(0, limit);
-  }
-
-  // ==========================================
-  // BROADCAST TRUCK SNAPSHOT
-  // ==========================================
-
-  void _broadcastSnapshot() {
-    final snapshot = _snapshot;
-
-    if (snapshot == null || _server == null) {
-      return;
-    }
-
-    final message = encodeSnapshot(snapshot);
-
-    for (final socket in _clients.keys.toList()) {
-      try {
-        socket.add(message);
-      } catch (_) {
-        _removeClient(socket);
-      }
-    }
-  }
-
-  // ==========================================
-  // NEW: BROADCAST JOB UPDATE
-  // ==========================================
-
-  void _broadcastJob(TruckLinkJobTelemetry? job) {
-    if (_server == null) return;
-
-    final message = encodeJobUpdate(job);
-
-    for (final socket in _clients.keys.toList()) {
-      try {
-        socket.add(message);
-      } catch (_) {
-        _removeClient(socket);
-      }
-    }
+    return result.length > maxLength ? result.substring(0, maxLength) : result;
   }
 
   // ==========================================
@@ -664,6 +856,8 @@ class _DesktopHomeState extends State<DesktopHome> {
       _serverStatus = 'Остановка сервера...';
     });
 
+    // Reject handshakes completing
+    // after the stop was requested.
     _server = null;
 
     try {
@@ -671,7 +865,7 @@ class _DesktopHomeState extends State<DesktopHome> {
         try {
           await socket.close().timeout(const Duration(seconds: 2));
         } catch (_) {
-          // Ignore already closed sockets.
+          // Ignore already closed clients.
         }
       }
 
@@ -681,6 +875,11 @@ class _DesktopHomeState extends State<DesktopHome> {
     } catch (error) {
       debugPrint('TruckLink server stop: $error');
     } finally {
+      // A fresh server session must not
+      // inherit the previous send throttle.
+      _lastJobBroadcastAt = null;
+      _lastJobBroadcastKey = null;
+
       if (mounted) {
         setState(() {
           _stopping = false;
@@ -691,7 +890,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // PLUGIN DOWNLOAD
+  // OPEN PLUGIN DOWNLOAD
   // ==========================================
 
   Future<void> _openPluginDownload() async {
@@ -700,12 +899,17 @@ class _DesktopHomeState extends State<DesktopHome> {
         ScsPluginDetector.downloadUrl,
       ], mode: ProcessStartMode.detached);
     } catch (error) {
-      debugPrint('Plugin page: $error');
+      debugPrint('TruckLink plugin download: $error');
 
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Не удалось открыть страницу плагина')),
+        const SnackBar(
+          content: Text(
+            'Не удалось открыть '
+            'страницу плагина',
+          ),
+        ),
       );
     }
   }
@@ -715,7 +919,9 @@ class _DesktopHomeState extends State<DesktopHome> {
   // ==========================================
 
   String get _pluginStatus {
-    if (_telemetryActive) return 'Работает';
+    if (_telemetryActive) {
+      return 'Работает';
+    }
 
     if (_sharedMemoryAvailable) {
       return 'Обнаружен в памяти';
@@ -736,7 +942,7 @@ class _DesktopHomeState extends State<DesktopHome> {
     }
 
     if (report.hasPlugin) {
-      return 'Установлен не для всех игр';
+      return 'Не для всех игр';
     }
 
     return 'Плагин не найден';
@@ -750,7 +956,7 @@ class _DesktopHomeState extends State<DesktopHome> {
     }
 
     if (!report.hasGames) {
-      return 'Проверь расположение игр в Steam';
+      return 'Проверь библиотеки Steam';
     }
 
     return report.games
@@ -762,7 +968,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // UI COMPONENTS
+  // REUSABLE CARD
   // ==========================================
 
   Widget _card(Widget child) {
@@ -809,7 +1015,11 @@ class _DesktopHomeState extends State<DesktopHome> {
               children: [
                 const Text(
                   'ИГРА',
-                  style: TextStyle(color: _muted, fontSize: 11),
+                  style: TextStyle(
+                    color: _muted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
                 const SizedBox(height: 4),
                 Text(
@@ -822,6 +1032,8 @@ class _DesktopHomeState extends State<DesktopHome> {
                 const SizedBox(height: 3),
                 Text(
                   _gameStatus,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(color: _muted, fontSize: 12),
                 ),
               ],
@@ -844,6 +1056,11 @@ class _DesktopHomeState extends State<DesktopHome> {
     final unknown =
         !_sharedMemoryAvailable && (report == null || !report.hasGames);
 
+    final pluginReady =
+        _telemetryActive ||
+        _sharedMemoryAvailable ||
+        report?.allInstalled == true;
+
     return _card(
       Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -852,11 +1069,7 @@ class _DesktopHomeState extends State<DesktopHome> {
             children: [
               _statusIcon(
                 Icons.extension_outlined,
-                _telemetryActive ||
-                        _sharedMemoryAvailable ||
-                        report?.allInstalled == true
-                    ? _accent
-                    : _warning,
+                pluginReady ? _accent : _warning,
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -865,19 +1078,25 @@ class _DesktopHomeState extends State<DesktopHome> {
                   children: [
                     const Text(
                       'ПЛАГИН ТЕЛЕМЕТРИИ',
-                      style: TextStyle(color: _muted, fontSize: 11),
+                      style: TextStyle(
+                        color: _muted,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       _pluginStatus,
                       style: const TextStyle(
-                        fontWeight: FontWeight.w700,
                         fontSize: 14,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       _pluginDetails,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(color: _muted, fontSize: 12),
                     ),
                   ],
@@ -890,8 +1109,8 @@ class _DesktopHomeState extends State<DesktopHome> {
                     : () => unawaited(_checkPlugin()),
                 icon: _pluginChecking
                     ? const SizedBox(
-                        width: 18,
                         height: 18,
+                        width: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.refresh_rounded, size: 19),
@@ -906,7 +1125,7 @@ class _DesktopHomeState extends State<DesktopHome> {
               onPressed: () {
                 unawaited(_openPluginDownload());
               },
-              icon: const Icon(Icons.open_in_new_rounded),
+              icon: const Icon(Icons.open_in_new, size: 17),
               label: const Text('Скачать / установить плагин'),
             ),
           ],
@@ -916,7 +1135,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // SERVER CARD
+  // WEBSOCKET CARD
   // ==========================================
 
   Widget _buildServerCard() {
@@ -937,11 +1156,17 @@ class _DesktopHomeState extends State<DesktopHome> {
                   children: [
                     const Text(
                       'WEBSOCKET HUB',
-                      style: TextStyle(color: _muted, fontSize: 11),
+                      style: TextStyle(
+                        color: _muted,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       _serverStatus,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         fontWeight: FontWeight.w700,
                         fontSize: 14,
@@ -959,7 +1184,7 @@ class _DesktopHomeState extends State<DesktopHome> {
               ),
             ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 12),
           Row(
             children: [
               Expanded(
@@ -974,31 +1199,32 @@ class _DesktopHomeState extends State<DesktopHome> {
                 tooltip: 'Скопировать адрес',
                 onPressed: _localIp == null
                     ? null
-                    : () {
-                        unawaited(
-                          Clipboard.setData(
-                            ClipboardData(text: _serverAddress),
-                          ),
-                        );
-                      },
+                    : () => unawaited(
+                        Clipboard.setData(ClipboardData(text: _serverAddress)),
+                      ),
                 icon: const Icon(Icons.copy_rounded, size: 18),
               ),
             ],
           ),
           const SizedBox(height: 6),
-          FilledButton.icon(
-            onPressed: busy
-                ? null
-                : running
-                ? () => unawaited(_stopServer())
-                : () => unawaited(_startServer()),
-            icon: Icon(running ? Icons.stop_rounded : Icons.play_arrow_rounded),
-            label: Text(
-              busy
-                  ? 'Подождите...'
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: busy
+                  ? null
                   : running
-                  ? 'Остановить сервер'
-                  : 'Запустить сервер',
+                  ? () => unawaited(_stopServer())
+                  : () => unawaited(_startServer()),
+              icon: Icon(
+                running ? Icons.stop_rounded : Icons.play_arrow_rounded,
+              ),
+              label: Text(
+                busy
+                    ? 'Подождите...'
+                    : running
+                    ? 'Остановить сервер'
+                    : 'Запустить сервер',
+              ),
             ),
           ),
         ],
@@ -1007,7 +1233,55 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // DEVICE CARD
+  // CONNECTED DEVICE ROW
+  // ==========================================
+
+  Widget _buildDeviceRow(_ConnectedDevice device) {
+    final details = <String>[
+      if (device.platform != null && device.platform!.isNotEmpty)
+        device.platform!,
+      device.ipAddress,
+      'с ${device.timeText}',
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        children: [
+          const Icon(Icons.smartphone_outlined, color: _accent, size: 21),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  device.displayName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  details.join(' · '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: _muted, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          const Icon(Icons.circle, color: _accent, size: 8),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================
+  // CONNECTED DEVICES CARD
   // ==========================================
 
   Widget _buildDevicesCard() {
@@ -1046,56 +1320,17 @@ class _DesktopHomeState extends State<DesktopHome> {
                 style: TextStyle(color: _muted, fontSize: 12),
               ),
             )
-          else
-            for (final device in devices)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 7),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.smartphone_outlined,
-                      color: _accent,
-                      size: 21,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            device.displayName,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13,
-                            ),
-                          ),
-                          const SizedBox(height: 3),
-                          Text(
-                            [
-                              if (device.platform != null &&
-                                  device.platform!.isNotEmpty)
-                                device.platform!,
-                              device.ipAddress,
-                              'с ${device.timeText}',
-                            ].join(' · '),
-                            style: const TextStyle(color: _muted, fontSize: 11),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Icon(Icons.circle, color: _accent, size: 8),
-                  ],
-                ),
-              ),
+          else ...[
+            const SizedBox(height: 7),
+            for (final device in devices) _buildDeviceRow(device),
+          ],
         ],
       ),
     );
   }
 
   // ==========================================
-  // BUILD
+  // COMPACT HUB UI
   // ==========================================
 
   @override
@@ -1125,7 +1360,8 @@ class _DesktopHomeState extends State<DesktopHome> {
               ),
               const SizedBox(height: 5),
               const Text(
-                'Связь между ETS2 / ATS и телефоном',
+                'Связь между ETS2 / ATS '
+                'и телефоном',
                 style: TextStyle(color: _muted, fontSize: 12),
               ),
               const SizedBox(height: 17),

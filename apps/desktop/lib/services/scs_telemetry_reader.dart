@@ -8,43 +8,21 @@ import 'package:telemetry_core/telemetry_core.dart';
 import 'scs_shared_memory.dart';
 
 // ============================================
-// SCS TELEMETRY READER
+// SCS SHARED MEMORY READER
 // ============================================
 
-/// Reads ETS2 / ATS telemetry from Windows
-/// shared memory.
-///
-/// Supported plugin:
-/// truckermudgeon/scs-sdk-plugin
-///
-/// Supported memory layout: revision 12.
 class ScsTelemetryReader {
   ScsTelemetryReader({ScsSharedMemory? memory})
     : _memory = memory ?? ScsSharedMemory();
 
   final ScsSharedMemory _memory;
 
-  // ==========================================
-  // SHARED MEMORY SIZE
-  // ==========================================
-
-  /// Earlier versions read only 1600 bytes.
-  ///
-  /// Job strings begin at offset 2300.
-  /// Job income is stored at offset 4000.
-  /// The onJob flag is stored at offset 4300.
-  ///
-  /// Read the complete first 12 zones.
-  ///
-  /// The plugin allocates 32 KiB, so 4400
-  /// bytes is within the mapping capacity.
+  // Revision 12:
+  // The job event flags end at offset 4303.
+  // The first 4400 bytes contain all fields
+  // currently used by TruckLink.
   static const int readSize = 4400;
 
-  // ==========================================
-  // READ ONE FRAME
-  // ==========================================
-
-  /// Returns null when shared memory is absent.
   ScsTelemetryFrame? read() {
     final bytes = _memory.readBytes(readSize);
 
@@ -55,10 +33,6 @@ class ScsTelemetryReader {
     return ScsTelemetryFrame.fromBytes(bytes);
   }
 
-  // ==========================================
-  // WATCH TELEMETRY
-  // ==========================================
-
   Stream<ScsTelemetryFrame?> watch({
     Duration interval = const Duration(milliseconds: 200),
   }) async* {
@@ -68,23 +42,15 @@ class ScsTelemetryReader {
 
     while (true) {
       yield read();
-
       await Future<void>.delayed(interval);
     }
   }
 }
 
 // ============================================
-// REAL SCS JOB DATA
+// SCS ACTIVE JOB
 // ============================================
 
-/// One active ETS2 / ATS job.
-///
-/// These values come from the SCS plugin's
-/// revision-12 memory layout.
-///
-/// This model is local to the Windows reader.
-/// Mobile protocol integration is the next step.
 class ScsJobFrame {
   const ScsJobFrame({
     required this.cargoName,
@@ -112,138 +78,78 @@ class ScsJobFrame {
     required this.navigationTimeSeconds,
   });
 
-  // ==========================================
-  // CARGO
-  // ==========================================
-
+  // Cargo.
   final String cargoName;
   final String cargoId;
-
   final double? cargoMassKg;
   final int unitCount;
   final double? unitMassKg;
-
-  /// Damage fraction, typically 0.0 - 1.0.
   final double? cargoDamage;
-
   final bool cargoLoaded;
   final bool specialJob;
 
-  // ==========================================
-  // SOURCE
-  // ==========================================
-
+  // Source.
   final String sourceCity;
   final String sourceCityId;
-
   final String sourceCompany;
   final String sourceCompanyId;
 
-  // ==========================================
-  // DESTINATION
-  // ==========================================
-
+  // Destination.
   final String destinationCity;
   final String destinationCityId;
-
   final String destinationCompany;
   final String destinationCompanyId;
 
-  // ==========================================
-  // JOB DETAILS
-  // ==========================================
-
+  // Job.
   final String jobMarket;
-
-  /// Reward in the game's currency.
-  ///
-  /// ETS2 normally uses EUR, ATS uses USD,
-  /// but the actual in-game currency may
-  /// depend on user settings.
   final int income;
-
-  /// Original planned job distance in km.
   final int plannedDistanceKm;
 
-  // ==========================================
-  // IN-GAME TIME
-  // ==========================================
-
-  /// Absolute game time in minutes.
-  /// This is not a Unix timestamp.
+  // Game time, in minutes.
   final int gameTimeAbsoluteMinutes;
-
-  /// Absolute in-game delivery deadline,
-  /// measured in game minutes.
   final int deliveryTimeAbsoluteMinutes;
 
-  // ==========================================
-  // LIVE NAVIGATION
-  // ==========================================
-
-  /// Route advisor distance in meters.
+  // GPS.
   final double? navigationDistanceMeters;
-
-  /// Route advisor time in seconds.
   final double? navigationTimeSeconds;
-
-  // ==========================================
-  // CALCULATED PROPERTIES
-  // ==========================================
 
   double? get navigationDistanceKm {
     final value = navigationDistanceMeters;
-
-    if (value == null) {
-      return null;
-    }
-
-    return value / 1000.0;
+    return value == null ? null : value / 1000;
   }
 
   double? get cargoMassTonnes {
     final value = cargoMassKg;
-
-    if (value == null) {
-      return null;
-    }
-
-    return value / 1000.0;
+    return value == null ? null : value / 1000;
   }
 
   double? get cargoDamagePercent {
     final value = cargoDamage;
-
-    if (value == null) {
-      return null;
-    }
+    if (value == null) return null;
 
     return (value * 100).clamp(0.0, 100.0).toDouble();
   }
 
-  /// Remaining delivery time in in-game minutes.
-  ///
-  /// This is not real-world wall-clock time.
   int? get remainingDeliveryMinutes {
     if (deliveryTimeAbsoluteMinutes <= 0) {
       return null;
     }
 
-    final remaining = deliveryTimeAbsoluteMinutes - gameTimeAbsoluteMinutes;
+    final difference = deliveryTimeAbsoluteMinutes - gameTimeAbsoluteMinutes;
 
-    return remaining < 0 ? 0 : remaining;
+    return difference < 0 ? 0 : difference;
   }
 
   String get displayCargo {
-    return cargoName.isEmpty ? 'Неизвестный груз' : cargoName;
+    return cargoName.trim().isEmpty ? 'Неизвестный груз' : cargoName;
   }
 
   String get displayRoute {
-    final start = sourceCity.isEmpty ? 'Неизвестно' : sourceCity;
+    final from = sourceCity.trim().isEmpty ? 'Неизвестно' : sourceCity;
 
-    final end = destinationCity.isEmpty ? 'Неизвестно' : destinationCity;
+    final to = destinationCity.trim().isEmpty ? 'Неизвестно' : destinationCity;
 
-    return '$start → $end';
+    return '$from → $to';
   }
 }
 
@@ -273,71 +179,55 @@ class ScsTelemetryFrame {
     required this.cruiseControlKmh,
     required this.speedLimitKmh,
     this.job,
+    this.jobCancelledEventFlag = false,
+    this.jobDeliveredEventFlag = false,
+    this.jobFinishedEventFlag = false,
   });
 
-  // ==========================================
-  // PLUGIN INFORMATION
-  // ==========================================
-
   static const int supportedRevision = 12;
-
   static const int minimumBytes = 4400;
 
+  // Plugin.
   final int pluginRevision;
   final int gameId;
   final int timestamp;
-
   final bool sdkActive;
   final bool paused;
 
-  // ==========================================
-  // ENGINE AND TRANSMISSION
-  // ==========================================
-
+  // Engine.
   final double speedKmh;
   final double rpm;
   final double maxRpm;
-
   final int gear;
   final int dashboardGear;
-
   final bool engineOn;
   final bool parkBrake;
 
-  // ==========================================
-  // FUEL
-  // ==========================================
-
+  // Fuel.
   final double fuelLiters;
   final double fuelCapacityLiters;
 
-  // ==========================================
-  // TRUCK CONDITION
-  // ==========================================
-
+  // Truck condition.
   final double odometerKm;
   final double waterTemperatureC;
   final double engineWear;
 
-  // ==========================================
-  // CRUISE CONTROL / NAVIGATION
-  // ==========================================
-
+  // Driver assistance.
   final double cruiseControlKmh;
   final double speedLimitKmh;
 
-  // ==========================================
-  // NEW: CURRENT JOB
-  // ==========================================
-
-  /// Null when the plugin reports onJob = false.
+  // Current job.
   final ScsJobFrame? job;
 
-  bool get hasActiveJob => job != null;
+  // Revision 12: event toggle flags.
+  //
+  // These are not persistent boolean statuses.
+  // An event is detected when the value changes.
+  final bool jobCancelledEventFlag;
+  final bool jobDeliveredEventFlag;
+  final bool jobFinishedEventFlag;
 
-  // ==========================================
-  // CALCULATED PROPERTIES
-  // ==========================================
+  bool get hasActiveJob => job != null;
 
   String get gameName => switch (gameId) {
     1 => 'Euro Truck Simulator 2',
@@ -360,13 +250,9 @@ class ScsTelemetryFrame {
   }
 
   // ==========================================
-  // CONVERT TO TRUCKLINK SNAPSHOT
+  // CONVERT TO EXISTING TRUCK SNAPSHOT
   // ==========================================
 
-  /// Preserve the existing mobile protocol.
-  ///
-  /// ScsJobFrame is not converted to the shared
-  /// Job model yet. That belongs to v0.7.2.
   TruckSnapshot toTruckSnapshot() {
     double? finiteOrNull(double value) {
       return value.isFinite ? value : null;
@@ -374,38 +260,29 @@ class ScsTelemetryFrame {
 
     return TruckSnapshot(
       timestamp: DateTime.now().toUtc(),
-
-      // Core telemetry.
       speedKmh: speedKmh,
       rpm: rpm,
       gear: gear,
       fuelLiters: fuelLiters,
       fuelCapacityLiters: fuelCapacityLiters,
       engineOn: engineOn,
-
-      // Extended engine telemetry.
       maxRpm: finiteOrNull(maxRpm),
       waterTemperatureC: finiteOrNull(waterTemperatureC),
-
-      // Truck condition.
       odometerKm: finiteOrNull(odometerKm),
       engineWear: finiteOrNull(engineWear),
-
-      // Driving assistance.
       cruiseControlKmh: finiteOrNull(cruiseControlKmh),
       speedLimitKmh: finiteOrNull(speedLimitKmh),
-
-      // Vehicle state.
       parkBrake: parkBrake,
       dashboardGear: dashboardGear,
 
-      // Job protocol integration is v0.7.2.
+      // Real job data is transmitted separately
+      // through the job_update protocol.
       job: null,
     );
   }
 
   // ==========================================
-  // DECODE REVISION 12
+  // DECODE SHARED MEMORY REVISION 12
   // ==========================================
 
   factory ScsTelemetryFrame.fromBytes(Uint8List bytes) {
@@ -419,32 +296,28 @@ class ScsTelemetryFrame {
 
     final data = ByteData.sublistView(bytes);
 
-    // ========================================
-    // LOW-LEVEL READ HELPERS
-    // ========================================
-
-    int uint32(int offset) {
+    int u32(int offset) {
       return data.getUint32(offset, Endian.little);
     }
 
-    int uint64(int offset) {
+    int u64(int offset) {
       return data.getUint64(offset, Endian.little);
     }
 
-    int int32(int offset) {
+    int i32(int offset) {
       return data.getInt32(offset, Endian.little);
     }
 
-    double float32(int offset) {
+    double f32(int offset) {
       return data.getFloat32(offset, Endian.little);
     }
 
-    bool boolean(int offset) {
+    bool flag(int offset) {
       return bytes[offset] != 0;
     }
 
-    double? nonNegativeFiniteFloat(int offset) {
-      final value = float32(offset);
+    double? safeNonNegative(int offset) {
+      final value = f32(offset);
 
       if (!value.isFinite || value < 0) {
         return null;
@@ -453,72 +326,60 @@ class ScsTelemetryFrame {
       return value;
     }
 
-    // ========================================
-    // NULL-TERMINATED UTF-8 STRING
-    // ========================================
+    String readString(int offset, int length) {
+      final limit = offset + length;
+      var end = offset;
 
-    String readString(int offset, int maxLength) {
-      final end = offset + maxLength;
-
-      var stringEnd = offset;
-
-      while (stringEnd < end && bytes[stringEnd] != 0) {
-        stringEnd++;
+      while (end < limit && bytes[end] != 0) {
+        end++;
       }
 
-      if (stringEnd == offset) {
-        return '';
-      }
+      if (end == offset) return '';
 
-      final stringBytes = Uint8List.sublistView(bytes, offset, stringEnd);
-
-      return utf8.decode(stringBytes, allowMalformed: true).trim();
+      return utf8
+          .decode(
+            Uint8List.sublistView(bytes, offset, end),
+            allowMalformed: true,
+          )
+          .trim();
     }
 
     // ========================================
-    // PLUGIN HEADER
+    // HEADER VALIDATION
     // ========================================
 
-    final revision = uint32(40);
+    final revision = u32(40);
 
     if (revision != supportedRevision) {
       throw UnsupportedError(
-        'Unsupported telemetry revision: '
-        '$revision. '
-        'Expected: $supportedRevision.',
+        'Unsupported SCS plugin revision: '
+        '$revision. Expected $supportedRevision.',
       );
     }
 
-    final gameId = uint32(52);
+    final gameId = u32(52);
 
     if (gameId != 0 && gameId != 1 && gameId != 2) {
-      throw FormatException('Unexpected game ID: $gameId');
+      throw FormatException('Unexpected SCS game ID: $gameId');
     }
 
     // ========================================
-    // CORE DATA
+    // CORE TRUCK TELEMETRY
     // ========================================
 
-    // SCS speed values are in m/s.
-    final speedKmh = float32(948) * 3.6;
-
-    final rpm = float32(952);
-
-    final fuel = float32(1000);
-    final fuelCapacity = float32(704);
-
-    // ========================================
-    // BASIC VALIDATION
-    // ========================================
+    final speedKmh = f32(948) * 3.6;
+    final rpm = f32(952);
+    final fuel = f32(1000);
+    final fuelCapacity = f32(704);
 
     if (!speedKmh.isFinite ||
         !rpm.isFinite ||
         !fuel.isFinite ||
         !fuelCapacity.isFinite) {
-      throw const FormatException('Telemetry contains non-finite values.');
+      throw const FormatException('Non-finite truck telemetry values');
     }
 
-    if (boolean(0) && gameId != 0) {
+    if (flag(0) && gameId != 0) {
       if (speedKmh.abs() > 500 ||
           rpm < 0 ||
           rpm > 10000 ||
@@ -526,320 +387,206 @@ class ScsTelemetryFrame {
           fuel > 10000 ||
           fuelCapacity < 0 ||
           fuelCapacity > 10000) {
-        throw const FormatException(
-          'Implausible telemetry values. '
-          'Check plugin memory layout.',
-        );
+        throw const FormatException('Implausible telemetry values');
       }
     }
 
     // ========================================
-    // NEW: READ ACTIVE JOB
+    // ACTIVE JOB
     // ========================================
+
+    // onJob is a persistent state flag.
+    final onJob = flag(4300);
 
     ScsJobFrame? currentJob;
 
-    // Revision-12 special_b.onJob:
-    // offset 4300.
-    //
-    // Do not infer an active job from old
-    // cargo strings or the reward amount:
-    // those fields may remain populated
-    // temporarily after a delivery.
-    final onJob = boolean(4300);
-
     if (onJob) {
       currentJob = ScsJobFrame(
-        // ================================
-        // CARGO
-        // ================================
+        // Cargo.
         cargoId: readString(2556, 64),
         cargoName: readString(2620, 64),
+        cargoMassKg: safeNonNegative(748),
+        unitCount: u32(96),
+        unitMassKg: safeNonNegative(944),
+        cargoDamage: safeNonNegative(1468),
+        cargoLoaded: flag(1564),
+        specialJob: flag(1565),
 
-        cargoMassKg: nonNegativeFiniteFloat(748),
-
-        unitCount: uint32(96),
-
-        unitMassKg: nonNegativeFiniteFloat(944),
-
-        cargoDamage: nonNegativeFiniteFloat(1468),
-
-        cargoLoaded: boolean(1564),
-        specialJob: boolean(1565),
-
-        // ================================
-        // DESTINATION
-        // ================================
+        // Destination.
         destinationCityId: readString(2684, 64),
-
         destinationCity: readString(2748, 64),
-
         destinationCompanyId: readString(2812, 64),
-
         destinationCompany: readString(2876, 64),
 
-        // ================================
-        // SOURCE
-        // ================================
+        // Source.
         sourceCityId: readString(2940, 64),
-
         sourceCity: readString(3004, 64),
-
         sourceCompanyId: readString(3068, 64),
-
         sourceCompany: readString(3132, 64),
 
-        // ================================
-        // JOB MARKET
-        // ================================
+        // Job details.
         jobMarket: readString(3404, 32),
+        income: u64(4000),
+        plannedDistanceKm: u32(100),
 
-        // ================================
-        // REWARD / PLANNED ROUTE
-        // ================================
-        income: uint64(4000),
+        // Game clock / deadline.
+        gameTimeAbsoluteMinutes: u32(64),
+        deliveryTimeAbsoluteMinutes: u32(88),
 
-        plannedDistanceKm: uint32(100),
-
-        // ================================
-        // GAME CLOCK / DEADLINE
-        // ================================
-        gameTimeAbsoluteMinutes: uint32(64),
-
-        deliveryTimeAbsoluteMinutes: uint32(88),
-
-        // ================================
-        // LIVE NAVIGATION
-        // ================================
-
-        // Route advisor distance in meters.
-        navigationDistanceMeters: nonNegativeFiniteFloat(1060),
-
-        // Route advisor ETA in seconds.
-        navigationTimeSeconds: nonNegativeFiniteFloat(1064),
+        // Route advisor.
+        navigationDistanceMeters: safeNonNegative(1060),
+        navigationTimeSeconds: safeNonNegative(1064),
       );
     }
 
     // ========================================
-    // BUILD COMPLETE FRAME
+    // RETURN FRAME
     // ========================================
 
     return ScsTelemetryFrame(
       pluginRevision: revision,
       gameId: gameId,
-
-      timestamp: uint64(8),
-
-      sdkActive: boolean(0),
-      paused: boolean(4),
+      timestamp: u64(8),
+      sdkActive: flag(0),
+      paused: flag(4),
 
       // Transmission.
-      gear: int32(504),
-      dashboardGear: int32(508),
+      gear: i32(504),
+      dashboardGear: i32(508),
 
       // Engine.
       speedKmh: speedKmh,
       rpm: rpm,
-      maxRpm: float32(740),
-      engineOn: boolean(1576),
+      maxRpm: f32(740),
+      engineOn: flag(1576),
 
-      // Brakes.
-      parkBrake: boolean(1566),
+      // Brake.
+      parkBrake: flag(1566),
 
       // Fuel.
       fuelLiters: fuel,
       fuelCapacityLiters: fuelCapacity,
 
       // Vehicle condition.
-      odometerKm: float32(1056),
-      waterTemperatureC: float32(1024),
-      engineWear: float32(1036),
+      odometerKm: f32(1056),
+      waterTemperatureC: f32(1024),
+      engineWear: f32(1036),
 
       // Driving assistance.
-      cruiseControlKmh: float32(988) * 3.6,
+      cruiseControlKmh: f32(988) * 3.6,
+      speedLimitKmh: f32(1068) * 3.6,
 
-      speedLimitKmh: float32(1068) * 3.6,
-
-      // New active job data.
+      // Job.
       job: currentJob,
+
+      // Event flags.
+      // Their changes indicate events.
+      jobFinishedEventFlag: flag(4301),
+      jobCancelledEventFlag: flag(4302),
+      jobDeliveredEventFlag: flag(4303),
     );
   }
 }
 
 // ============================================
-// CONSOLE DIAGNOSTIC
+// WINDOWS CONSOLE DIAGNOSTIC
 // ============================================
 
 /// Run from apps/desktop:
 ///
 /// dart run lib/services/scs_telemetry_reader.dart
-///
-/// This diagnostic reads data directly from
-/// the plugin without requiring Windows Hub's
-/// WebSocket server or the Android application.
 Future<void> main() async {
   if (!Platform.isWindows) {
-    stderr.writeln('TruckLink telemetry requires Windows.');
-
+    stderr.writeln('Диагностика доступна только на Windows.');
     exitCode = 1;
     return;
   }
 
   final reader = ScsTelemetryReader();
 
-  stdout.writeln('========================================');
-
-  stdout.writeln(' TruckLink v0.7.1 - Job Telemetry');
-
-  stdout.writeln('========================================');
-
-  stdout.writeln('Запусти ETS2 или ATS и загрузи профиль.');
-
-  stdout.writeln('Прими заказ для проверки его полей.');
-
-  stdout.writeln('Нажми Ctrl+C для завершения.');
-
+  stdout.writeln('====================================');
+  stdout.writeln(' TruckLink v0.7.4 SCS Diagnostic');
+  stdout.writeln('====================================');
+  stdout.writeln('Запусти ETS2 / ATS.');
+  stdout.writeln('Прими, заверши или отмени заказ.');
+  stdout.writeln('Ctrl+C — выход.');
   stdout.writeln();
 
+  bool? previousOnJob;
+  bool? previousDelivered;
+  bool? previousCancelled;
   int? previousTimestamp;
-  bool? previousJobState;
 
-  try {
-    await for (final frame in reader.watch(
-      interval: const Duration(seconds: 1),
-    )) {
+  while (true) {
+    try {
+      final frame = reader.read();
+
       if (frame == null) {
-        if (previousTimestamp != null || previousJobState != false) {
-          stdout.writeln('[WAITING] Shared memory недоступна.');
+        if (previousTimestamp != null) {
+          stdout.writeln('[DISCONNECTED] Shared memory недоступна.');
         }
 
+        previousOnJob = null;
+        previousDelivered = null;
+        previousCancelled = null;
         previousTimestamp = null;
-        previousJobState = false;
-        continue;
-      }
+      } else {
+        final onJob = frame.hasActiveJob;
 
-      if (!frame.sdkActive) {
-        stdout.writeln('[WAITING] SDK обнаружен, но не активен.');
+        if (previousOnJob == null) {
+          stdout.writeln(
+            '[CONNECTED] ${frame.gameName}, '
+            'revision ${frame.pluginRevision}',
+          );
+        } else if (!previousOnJob && onJob) {
+          stdout.writeln('[STARTED] Заказ принят.');
+        } else if (previousOnJob && !onJob) {
+          stdout.writeln('[ENDED] Активный заказ исчез.');
+        }
 
-        previousTimestamp = null;
-        continue;
-      }
+        // Toggle flags: detect changes,
+        // including true -> false.
+        if (previousDelivered != null &&
+            previousDelivered != frame.jobDeliveredEventFlag) {
+          stdout.writeln('[DELIVERED] Доставка завершена.');
+        }
 
-      if (frame.paused) {
-        stdout.writeln('[PAUSED] Игра на паузе.');
+        if (previousCancelled != null &&
+            previousCancelled != frame.jobCancelledEventFlag) {
+          stdout.writeln('[CANCELLED] Заказ отменён.');
+        }
 
-        continue;
-      }
+        if (onJob && previousTimestamp != frame.timestamp) {
+          final job = frame.job!;
 
-      final changed = previousTimestamp != frame.timestamp;
-
-      previousTimestamp = frame.timestamp;
-
-      final job = frame.job;
-
-      if (job == null) {
-        if (previousJobState != false) {
-          stdout.writeln('----------------------------------------');
-
+          stdout.writeln('------------------------------');
           stdout.writeln('Game: ${frame.gameName}');
-
-          stdout.writeln('[NO JOB] Активного заказа нет.');
+          stdout.writeln('Cargo: ${job.displayCargo}');
+          stdout.writeln('Route: ${job.displayRoute}');
+          stdout.writeln('Reward: ${job.income}');
+          stdout.writeln(
+            'Remaining: '
+            '${job.navigationDistanceKm?.toStringAsFixed(1) ?? "N/A"} km',
+          );
+          stdout.writeln(
+            'ETA: '
+            '${job.navigationTimeSeconds?.toStringAsFixed(0) ?? "N/A"} s',
+          );
+          stdout.writeln(
+            'Delivery remaining: '
+            '${job.remainingDeliveryMinutes ?? "N/A"} game min',
+          );
         }
 
-        previousJobState = false;
-        continue;
+        previousOnJob = onJob;
+        previousDelivered = frame.jobDeliveredEventFlag;
+        previousCancelled = frame.jobCancelledEventFlag;
+        previousTimestamp = frame.timestamp;
       }
-
-      if (previousJobState != true) {
-        stdout.writeln('[JOB STARTED] Обнаружена перевозка.');
-      }
-
-      previousJobState = true;
-
-      stdout.writeln('----------------------------------------');
-
-      stdout.writeln('Game: ${frame.gameName}');
-
-      stdout.writeln('Revision: ${frame.pluginRevision}');
-
-      stdout.writeln(
-        'Telemetry updating: '
-        '${changed ? "YES" : "NO"}',
-      );
-
-      stdout.writeln();
-
-      stdout.writeln('Cargo: ${job.displayCargo}');
-
-      stdout.writeln('Cargo ID: ${job.cargoId}');
-
-      stdout.writeln('Route: ${job.displayRoute}');
-
-      stdout.writeln('Source company: ${job.sourceCompany}');
-
-      stdout.writeln(
-        'Destination company: '
-        '${job.destinationCompany}',
-      );
-
-      stdout.writeln('Market: ${job.jobMarket}');
-
-      stdout.writeln('Reward: ${job.income}');
-
-      stdout.writeln(
-        'Planned distance: '
-        '${job.plannedDistanceKm} km',
-      );
-
-      final remainingKm = job.navigationDistanceKm;
-
-      stdout.writeln(
-        'Navigation remaining: '
-        '${remainingKm?.toStringAsFixed(1) ?? "N/A"} km',
-      );
-
-      final routeSeconds = job.navigationTimeSeconds;
-
-      stdout.writeln(
-        'Navigation ETA: '
-        '${routeSeconds?.toStringAsFixed(0) ?? "N/A"} s',
-      );
-
-      stdout.writeln(
-        'Cargo mass: '
-        '${job.cargoMassKg?.toStringAsFixed(0) ?? "N/A"} kg',
-      );
-
-      stdout.writeln(
-        'Cargo damage: '
-        '${job.cargoDamagePercent?.toStringAsFixed(1) ?? "N/A"}%',
-      );
-
-      stdout.writeln('Cargo loaded: ${job.cargoLoaded}');
-
-      stdout.writeln('Special job: ${job.specialJob}');
-
-      stdout.writeln(
-        'Delivery deadline (game minutes): '
-        '${job.deliveryTimeAbsoluteMinutes}',
-      );
-
-      stdout.writeln(
-        'Remaining delivery (game minutes): '
-        '${job.remainingDeliveryMinutes ?? "N/A"}',
-      );
+    } catch (error) {
+      stderr.writeln('[ERROR] $error');
     }
-  } on UnsupportedError catch (error) {
-    stderr.writeln('[UNSUPPORTED] $error');
 
-    exitCode = 2;
-  } on FormatException catch (error) {
-    stderr.writeln('[INVALID DATA] $error');
-
-    exitCode = 3;
-  } catch (error) {
-    stderr.writeln('[ERROR] $error');
-
-    exitCode = 1;
+    await Future<void>.delayed(const Duration(seconds: 1));
   }
 }
