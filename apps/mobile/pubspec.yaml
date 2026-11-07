@@ -17,6 +17,7 @@ dependencies:
   network_protocol:
     path: ../../packages/network_protocol
   shared_preferences: 2.5.6
+  device_info_plus: 11.5.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

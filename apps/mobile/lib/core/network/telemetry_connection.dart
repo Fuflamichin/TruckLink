@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:network_protocol/network_protocol.dart';
 import 'package:telemetry_core/telemetry_core.dart';
@@ -33,6 +35,10 @@ enum TelemetryConnectionStatus {
 /// - WebSocket ping/pong monitoring
 /// - Telemetry freshness watchdog
 /// - Throttled UI notifications
+/// - Automatic device identification
+///
+/// Device identification is optional and must
+/// never interrupt the telemetry connection.
 class TelemetryConnection extends ChangeNotifier {
   TelemetryConnection() {
     _watchdog = Timer.periodic(
@@ -105,8 +111,8 @@ class TelemetryConnection extends ChangeNotifier {
 
   DateTime? get lastReceivedAt => _lastReceivedAt;
 
-  /// WebSocket is connected, even if ETS2 is
-  /// not currently producing telemetry.
+  /// WebSocket is connected, even if ETS2/ATS
+  /// is not currently producing telemetry.
   bool get isConnected {
     return _status == TelemetryConnectionStatus.waiting ||
         _status == TelemetryConnectionStatus.connected ||
@@ -149,6 +155,7 @@ class TelemetryConnection extends ChangeNotifier {
         TelemetryConnectionStatus.error,
         'Введите корректный IPv4-адрес компьютера',
       );
+
       return;
     }
 
@@ -170,17 +177,20 @@ class TelemetryConnection extends ChangeNotifier {
     final uri = Uri(scheme: 'ws', host: cleanHost, port: serverPort);
 
     try {
-      // Start a real WebSocket connection.
-      //
-      // The custom HttpClient controls TCP timeout.
-      // Future.timeout controls the overall handshake.
+      // ======================================
+      // OPEN NATIVE WEBSOCKET
+      // ======================================
+
+      // We keep the original WebSocket.connect
+      // because customClient is important
+      // for the TCP connection timeout.
       final attempt = WebSocket.connect(uri.toString(), customClient: client);
 
-      // If a timed-out or cancelled attempt finishes
-      // later, immediately close its socket.
+      // If a timed-out or cancelled attempt
+      // finishes later, close that socket.
       //
-      // This prevents old attempts from leaving
-      // orphaned connections behind.
+      // This prevents old attempts from
+      // leaving orphaned connections behind.
       attempt
           .then<void>(
             (lateSocket) {
@@ -191,7 +201,8 @@ class TelemetryConnection extends ChangeNotifier {
               }
             },
             onError: (Object error, StackTrace stackTrace) {
-              // The main connection attempt handles errors.
+              // The main connection attempt
+              // handles errors.
             },
           )
           .ignore();
@@ -201,7 +212,7 @@ class TelemetryConnection extends ChangeNotifier {
         onTimeout: () {
           acceptSocket = false;
 
-          // Abort the underlying TCP/HTTP operation.
+          // Abort the underlying operation.
           client.close(force: true);
 
           throw TimeoutException('Windows Hub connection timed out');
@@ -209,23 +220,28 @@ class TelemetryConnection extends ChangeNotifier {
       );
 
       // ======================================
-      // CHECK WHETHER ATTEMPT IS STILL VALID
+      // CHECK WHETHER ATTEMPT IS CURRENT
       // ======================================
 
       if (!_isCurrent(generation)) {
         acceptSocket = false;
+
         socket.close().ignore();
+
         return;
       }
 
-      // Enable ping/pong to detect a broken link.
+      // ======================================
+      // ENABLE CONNECTION MONITORING
+      // ======================================
+
       socket.pingInterval = pingInterval;
 
       _socket = socket;
       _host = cleanHost;
 
       // ======================================
-      // LISTEN FOR TELEMETRY
+      // LISTEN FOR GAME TELEMETRY
       // ======================================
 
       _subscription = socket.listen(
@@ -246,14 +262,29 @@ class TelemetryConnection extends ChangeNotifier {
         cancelOnError: true,
       );
 
-      // Connection is established.
-      //
-      // Waiting for ETS2 does NOT mean the
-      // WebSocket connection has failed.
+      // ======================================
+      // CONNECTION ESTABLISHED
+      // ======================================
+
+      // Waiting for ETS2 / ATS does NOT
+      // mean the WebSocket connection failed.
       _setStatus(
         TelemetryConnectionStatus.waiting,
-        'Подключено. Ожидание телеметрии ETS2...',
+        'Подключено. Ожидание телеметрии ETS2 / ATS...',
       );
+
+      // ======================================
+      // NEW: SEND DEVICE INFORMATION
+      // ======================================
+
+      // Run independently.
+      //
+      // Do not await device_info_plus here:
+      // it must not delay receiving telemetry.
+      //
+      // A failure to detect the model must
+      // never disconnect the WebSocket.
+      unawaited(_sendDeviceHello(socket, generation));
     } catch (error) {
       acceptSocket = false;
 
@@ -266,7 +297,7 @@ class TelemetryConnection extends ChangeNotifier {
       // ======================================
 
       // Do not await socket closure here.
-      // It was the cause of long/hung attempts.
+      // It previously caused long/hung attempts.
       _stopTransport();
       _clearTelemetry();
 
@@ -277,6 +308,172 @@ class TelemetryConnection extends ChangeNotifier {
         _connectionErrorMessage(error, cleanHost),
       );
     }
+  }
+
+  // ==========================================
+  // NEW: SEND DEVICE HELLO
+  // ==========================================
+
+  /// Sends a small optional service message
+  /// to the Windows Hub after connection.
+  ///
+  /// Example:
+  ///
+  /// {
+  ///   "type": "client_hello",
+  ///   "version": 1,
+  ///   "name": "Samsung SM-S921B",
+  ///   "platform": "Android"
+  /// }
+  ///
+  /// This message is separate from
+  /// TruckSnapshot and does not change
+  /// the existing telemetry protocol.
+  Future<void> _sendDeviceHello(WebSocket socket, int generation) async {
+    String platform = Platform.isAndroid
+        ? 'Android'
+        : Platform.isIOS
+        ? 'iOS'
+        : Platform.operatingSystem;
+
+    String deviceName = Platform.isAndroid
+        ? 'Android-устройство'
+        : Platform.isIOS
+        ? 'iPhone / iPad'
+        : 'TruckLink Device';
+
+    // ========================================
+    // READ DEVICE INFORMATION
+    // ========================================
+
+    try {
+      final deviceInfo = DeviceInfoPlugin();
+
+      if (Platform.isAndroid) {
+        final androidInfo = await deviceInfo.androidInfo;
+
+        final manufacturer = _cleanDeviceLabel(
+          androidInfo.manufacturer,
+          maxLength: 32,
+        );
+
+        final model = _cleanDeviceLabel(androidInfo.model, maxLength: 48);
+
+        if (model.isNotEmpty) {
+          if (manufacturer.isEmpty ||
+              model.toLowerCase().startsWith(manufacturer.toLowerCase())) {
+            deviceName = model;
+          } else {
+            final formattedManufacturer = _capitalize(manufacturer);
+
+            deviceName = '$formattedManufacturer $model';
+          }
+        }
+
+        platform = 'Android';
+      } else if (Platform.isIOS) {
+        final iosInfo = await deviceInfo.iosInfo;
+
+        final model = _cleanDeviceLabel(iosInfo.model, maxLength: 48);
+
+        if (model.isNotEmpty) {
+          deviceName = model;
+        }
+
+        platform = 'iOS';
+      }
+    } catch (error) {
+      // Do not interrupt the connection.
+      //
+      // Even if device_info_plus is unavailable,
+      // we can send a generic device name.
+      debugPrint(
+        'TruckLink: device info unavailable: '
+        '$error',
+      );
+    }
+
+    // ========================================
+    // VALIDATE CONNECTION BEFORE SENDING
+    // ========================================
+
+    // Device information might have taken
+    // some time to load.
+    //
+    // The user could have disconnected
+    // or started another connection attempt
+    // during that time.
+    if (!_isCurrent(generation) ||
+        !identical(_socket, socket) ||
+        socket.readyState != WebSocket.open) {
+      return;
+    }
+
+    // ========================================
+    // BUILD CLIENT HELLO MESSAGE
+    // ========================================
+
+    final safeName = _cleanDeviceLabel(deviceName, maxLength: 64);
+
+    final safePlatform = _cleanDeviceLabel(platform, maxLength: 20);
+
+    final message = jsonEncode({
+      'type': 'client_hello',
+      'version': 1,
+      'name': safeName.isEmpty ? 'TruckLink Device' : safeName,
+      'platform': safePlatform,
+    });
+
+    // ========================================
+    // SEND WITHOUT DISCONNECTING ON ERROR
+    // ========================================
+
+    try {
+      socket.add(message);
+
+      debugPrint(
+        'TruckLink: device identification sent: '
+        '$safeName ($safePlatform)',
+      );
+    } catch (error) {
+      // Identification is optional.
+      // Telemetry continues normally.
+      debugPrint(
+        'TruckLink: cannot send device hello: '
+        '$error',
+      );
+    }
+  }
+
+  // ==========================================
+  // NEW: CLEAN DEVICE NAME
+  // ==========================================
+
+  /// Prevents control characters and very
+  /// long strings from reaching Windows Hub.
+  String _cleanDeviceLabel(String value, {required int maxLength}) {
+    final cleaned = value
+        .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+
+    if (cleaned.length <= maxLength) {
+      return cleaned;
+    }
+
+    return cleaned.substring(0, maxLength);
+  }
+
+  // ==========================================
+  // NEW: FORMAT MANUFACTURER NAME
+  // ==========================================
+
+  String _capitalize(String value) {
+    if (value.isEmpty) {
+      return value;
+    }
+
+    return value[0].toUpperCase() + value.substring(1);
   }
 
   // ==========================================
@@ -314,18 +511,21 @@ class TelemetryConnection extends ChangeNotifier {
         throw const FormatException('Expected text telemetry message');
       }
 
+      // The Windows Hub continues sending
+      // exactly the same snapshot format.
       final nextSnapshot = decodeSnapshot(message);
 
       // Only keep the most recent frame.
       _pendingSnapshot = nextSnapshot;
+
       _lastReceivedAt = DateTime.now();
 
-      // Avoid notifying the entire UI for
-      // every WebSocket packet.
+      // Avoid notifying the entire UI
+      // for every WebSocket packet.
       _updateTimer ??= Timer(uiUpdateInterval, _publishPendingSnapshot);
     } catch (error) {
-      // Invalid protocol data means this connection
-      // is not suitable for TruckLink.
+      // Invalid protocol data means this
+      // connection is not suitable for TruckLink.
       _handleConnectionLost(generation, 'Ошибка формата телеметрии: $error');
     }
   }
@@ -341,13 +541,16 @@ class TelemetryConnection extends ChangeNotifier {
 
     final pending = _pendingSnapshot;
 
-    if (pending == null) return;
+    if (pending == null) {
+      return;
+    }
 
     _pendingSnapshot = null;
     _snapshot = pending;
 
     _status = TelemetryConnectionStatus.connected;
-    _statusMessage = 'Телеметрия ETS2 активна';
+
+    _statusMessage = 'Телеметрия ETS2 / ATS активна';
 
     _notify();
   }
@@ -365,14 +568,19 @@ class TelemetryConnection extends ChangeNotifier {
 
     final lastReceived = _lastReceivedAt;
 
-    if (lastReceived == null) return;
+    if (lastReceived == null) {
+      return;
+    }
 
     final elapsed = DateTime.now().difference(lastReceived);
 
     if (elapsed > telemetryTimeout) {
       _clearTelemetry();
 
-      _setStatus(TelemetryConnectionStatus.stale, 'Нет новых данных от ETS2');
+      _setStatus(
+        TelemetryConnectionStatus.stale,
+        'Нет новых данных от ETS2 / ATS',
+      );
     }
   }
 
@@ -381,9 +589,12 @@ class TelemetryConnection extends ChangeNotifier {
   // ==========================================
 
   void _handleConnectionLost(int generation, String message) {
-    if (!_isCurrent(generation)) return;
+    if (!_isCurrent(generation)) {
+      return;
+    }
 
-    // Invalidate callbacks belonging to this socket.
+    // Invalidate callbacks belonging
+    // to this socket.
     ++_generation;
 
     _stopTransport();
@@ -432,8 +643,8 @@ class TelemetryConnection extends ChangeNotifier {
     _socket = null;
     _httpClient = null;
 
-    // Asynchronous cleanup must never keep the
-    // UI in the connecting state indefinitely.
+    // Asynchronous cleanup must never keep
+    // the UI in connecting state indefinitely.
     subscription?.cancel().ignore();
 
     socket?.close().ignore();
