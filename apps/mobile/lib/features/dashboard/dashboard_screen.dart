@@ -16,6 +16,11 @@ class DashboardScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Scaffold.extendBody makes the scroll view extend
+    // behind the floating navigation.
+    // MediaQuery.padding.bottom includes its actual height.
+    final navigationInset = MediaQuery.paddingOf(context).bottom;
+
     return CustomScrollView(
       key: const PageStorageKey<String>('trucklink-dashboard-scroll'),
       physics: const ClampingScrollPhysics(),
@@ -89,7 +94,7 @@ class DashboardScreen extends StatelessWidget {
         ),
 
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+          padding: EdgeInsets.fromLTRB(16, 0, 16, navigationInset + 32),
           sliver: SliverToBoxAdapter(
             child: _AdditionalMetricsCard(connection: connection),
           ),

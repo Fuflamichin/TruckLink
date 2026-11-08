@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
+import 'package:network_protocol/event_sync_protocol.dart';
 import 'package:network_protocol/finance_protocol.dart';
 import 'package:network_protocol/job_lifecycle_protocol.dart';
 import 'package:network_protocol/job_protocol.dart';
@@ -29,16 +31,29 @@ enum TelemetryConnectionStatus {
 }
 
 // ============================================
-// SHARED MOBILE CONNECTION
+// TRUCKLINK CONNECTION v0.8.4
 // ============================================
 
 class TelemetryConnection extends ChangeNotifier {
   TelemetryConnection() {
+    final initialState = WidgetsBinding.instance.lifecycleState;
+
+    _isForeground =
+        initialState == null || initialState == AppLifecycleState.resumed;
+
+    _lifecycleListener = AppLifecycleListener(
+      onStateChange: _onLifecycleChanged,
+    );
+
     _watchdog = Timer.periodic(
       const Duration(seconds: 1),
-      (_) => _checkFreshness(),
+      (_) => _checkConnection(),
     );
   }
+
+  // ==========================================
+  // CONNECTION CONFIGURATION
+  // ==========================================
 
   static const int serverPort = 8787;
 
@@ -52,23 +67,44 @@ class TelemetryConnection extends ChangeNotifier {
 
   static const Duration uiUpdateInterval = Duration(milliseconds: 100);
 
+  static const Duration resumeMessageTimeout = Duration(seconds: 20);
+
+  static const List<int> _reconnectDelays = [1, 2, 4, 8, 16, 30];
+
   // ==========================================
-  // NETWORK
+  // NETWORK TRANSPORT
   // ==========================================
 
   HttpClient? _httpClient;
   WebSocket? _socket;
-
   StreamSubscription<dynamic>? _subscription;
 
   Timer? _watchdog;
   Timer? _updateTimer;
+  Timer? _reconnectTimer;
+
+  late final AppLifecycleListener _lifecycleListener;
 
   int _generation = 0;
+
   bool _disposed = false;
+  bool _connecting = false;
+  bool _isForeground = true;
 
   // ==========================================
-  // TRUCK
+  // AUTO RECONNECT
+  // ==========================================
+
+  String? _desiredHost;
+  bool _autoReconnectEnabled = false;
+
+  int _reconnectAttempt = 0;
+
+  DateTime? _connectedAt;
+  DateTime? _lastMessageAt;
+
+  // ==========================================
+  // LIVE TRUCK DATA
   // ==========================================
 
   TruckSnapshot? _snapshot;
@@ -77,7 +113,7 @@ class TelemetryConnection extends ChangeNotifier {
   DateTime? _lastReceivedAt;
 
   // ==========================================
-  // CURRENT JOB
+  // JOB DATA
   // ==========================================
 
   TruckLinkJobTelemetry? _activeJob;
@@ -87,17 +123,25 @@ class TelemetryConnection extends ChangeNotifier {
   String? _endedJobIdentity;
 
   // ==========================================
-  // CONNECTION STATE
+  // EVENT SYNC
+  // ==========================================
+
+  bool _syncInProgress = false;
+  int _expectedSyncCount = 0;
+  int _receivedSyncCount = 0;
+  int _lastSyncCount = 0;
+
+  // ==========================================
+  // CONNECTION STATUS
   // ==========================================
 
   TelemetryConnectionStatus _status = TelemetryConnectionStatus.disconnected;
 
   String _statusMessage = 'Нет подключения к ПК';
-
   String? _host;
 
   // ==========================================
-  // GETTERS
+  // PUBLIC GETTERS
   // ==========================================
 
   TruckSnapshot? get snapshot => _snapshot;
@@ -116,6 +160,16 @@ class TelemetryConnection extends ChangeNotifier {
 
   DateTime? get lastReceivedAt => _lastReceivedAt;
 
+  bool get isConnecting => _connecting;
+
+  bool get autoReconnectEnabled => _autoReconnectEnabled;
+
+  String? get rememberedHost => _desiredHost;
+
+  bool get isSyncingHistory => _syncInProgress;
+
+  int get lastSyncCount => _lastSyncCount;
+
   bool get isConnected {
     return _status == TelemetryConnectionStatus.waiting ||
         _status == TelemetryConnectionStatus.connected ||
@@ -127,35 +181,72 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // CONNECT
+  // MANUAL CONNECTION
   // ==========================================
 
   Future<void> connect(String host) async {
     if (_disposed) return;
 
     final cleanHost = host.trim();
-    final generation = ++_generation;
-
-    _stopTransport();
-    _clearTelemetry();
-
-    _host = null;
 
     final address = InternetAddress.tryParse(cleanHost);
 
     if (address == null || address.type != InternetAddressType.IPv4) {
+      _cancelReconnect();
+
+      _autoReconnectEnabled = false;
+      _desiredHost = null;
+
+      ++_generation;
+      _connecting = false;
+
+      _stopTransport();
+      _clearTelemetry();
+
       _setStatus(
         TelemetryConnectionStatus.error,
-        'Введите корректный IPv4-адрес '
-        'компьютера',
+        'Введите корректный IPv4-адрес компьютера',
       );
+
       return;
     }
 
+    _desiredHost = address.address;
+    _autoReconnectEnabled = true;
+    _reconnectAttempt = 0;
+
+    _cancelReconnect();
+
+    await _openConnection(address.address, automatic: false);
+  }
+
+  // ==========================================
+  // OPEN CONNECTION
+  // ==========================================
+
+  Future<void> _openConnection(String host, {required bool automatic}) async {
+    if (_disposed || !_autoReconnectEnabled) {
+      return;
+    }
+
+    final generation = ++_generation;
+
+    _cancelReconnect();
+    _stopTransport();
+    _clearTelemetry();
+
+    _host = null;
+    _connectedAt = null;
+    _lastMessageAt = null;
+
+    _connecting = true;
+
     _setStatus(
       TelemetryConnectionStatus.connecting,
-      'Подключение к '
-      '$cleanHost:$serverPort...',
+      automatic
+          ? 'Восстановление подключения '
+                'к $host:$serverPort...'
+          : 'Подключение к $host:$serverPort...',
     );
 
     final client = HttpClient()..connectionTimeout = tcpTimeout;
@@ -164,12 +255,13 @@ class TelemetryConnection extends ChangeNotifier {
 
     var acceptSocket = true;
 
-    final uri = Uri(scheme: 'ws', host: cleanHost, port: serverPort);
+    final uri = Uri(scheme: 'ws', host: host, port: serverPort);
 
     try {
       final attempt = WebSocket.connect(uri.toString(), customClient: client);
 
-      // A superseded attempt may finish later.
+      // Dispose of any connection that
+      // finishes after it has been superseded.
       attempt
           .then<void>(
             (lateSocket) {
@@ -180,7 +272,7 @@ class TelemetryConnection extends ChangeNotifier {
               }
             },
             onError: (Object error, StackTrace stackTrace) {
-              // The awaited attempt handles errors.
+              // Await below handles the error.
             },
           )
           .ignore();
@@ -189,10 +281,9 @@ class TelemetryConnection extends ChangeNotifier {
         connectionTimeout,
         onTimeout: () {
           acceptSocket = false;
-
           client.close(force: true);
 
-          throw TimeoutException('Windows Hub connection timed out');
+          throw TimeoutException('TruckLink connection timed out');
         },
       );
 
@@ -205,7 +296,12 @@ class TelemetryConnection extends ChangeNotifier {
       socket.pingInterval = pingInterval;
 
       _socket = socket;
-      _host = cleanHost;
+      _host = host;
+
+      _connectedAt = DateTime.now();
+      _lastMessageAt = _connectedAt;
+
+      _reconnectAttempt = 0;
 
       _subscription = socket.listen(
         (dynamic message) {
@@ -214,7 +310,7 @@ class TelemetryConnection extends ChangeNotifier {
           }
         },
         onDone: () {
-          _handleConnectionLost(generation, 'Соединение с Windows Hub закрыто');
+          _handleConnectionLost(generation, 'Windows Hub закрыл соединение');
         },
         onError: (Object error) {
           _handleConnectionLost(
@@ -227,9 +323,28 @@ class TelemetryConnection extends ChangeNotifier {
 
       _setStatus(
         TelemetryConnectionStatus.waiting,
-        'Подключено. Ожидание '
-        'телеметрии ETS2 / ATS...',
+        'Подключено. Ожидание телеметрии ETS2 / ATS...',
       );
+
+      // ======================================
+      // REQUEST MISSED EVENTS
+      // ======================================
+
+      // The Hub will send:
+      // event_sync_begin
+      // job_event / finance_event (archived)
+      // event_sync_end
+      try {
+        socket.add(encodeEventSyncRequest());
+
+        debugPrint('TruckLink: requested event sync');
+      } catch (error) {
+        debugPrint('TruckLink: sync request failed: $error');
+      }
+
+      // ======================================
+      // IDENTIFY PHONE
+      // ======================================
 
       unawaited(_sendDeviceHello(socket, generation));
     } catch (error) {
@@ -241,16 +356,168 @@ class TelemetryConnection extends ChangeNotifier {
       _clearTelemetry();
 
       _host = null;
+      _connectedAt = null;
+      _lastMessageAt = null;
 
       _setStatus(
         TelemetryConnectionStatus.error,
-        _connectionErrorMessage(error, cleanHost),
+        _connectionErrorMessage(error, host),
       );
+
+      _scheduleReconnect();
+    } finally {
+      if (_isCurrent(generation)) {
+        _connecting = false;
+      }
     }
   }
 
   // ==========================================
-  // MOBILE DEVICE INFORMATION
+  // FLUTTER APP LIFECYCLE
+  // ==========================================
+
+  void _onLifecycleChanged(AppLifecycleState state) {
+    if (_disposed) return;
+
+    if (state == AppLifecycleState.resumed) {
+      _isForeground = true;
+      _onAppResumed();
+      return;
+    }
+
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _isForeground = false;
+      _cancelReconnect();
+    }
+  }
+
+  // ==========================================
+  // RESUME / UNLOCK
+  // ==========================================
+
+  void _onAppResumed() {
+    if (_disposed ||
+        !_autoReconnectEnabled ||
+        _desiredHost == null ||
+        _connecting) {
+      return;
+    }
+
+    final socket = _socket;
+
+    if (socket == null || socket.readyState != WebSocket.open) {
+      _scheduleReconnect(immediate: true);
+      return;
+    }
+
+    final lastActivity = _lastMessageAt ?? _connectedAt;
+
+    if (lastActivity == null ||
+        DateTime.now().difference(lastActivity) > resumeMessageTimeout) {
+      unawaited(_openConnection(_desiredHost!, automatic: true));
+    }
+  }
+
+  // ==========================================
+  // RECONNECTION BACKOFF
+  // ==========================================
+
+  void _scheduleReconnect({bool immediate = false}) {
+    if (_disposed ||
+        !_autoReconnectEnabled ||
+        !_isForeground ||
+        _desiredHost == null) {
+      return;
+    }
+
+    if (_reconnectTimer != null && !immediate) {
+      return;
+    }
+
+    if (immediate) {
+      _cancelReconnect();
+    }
+
+    final index = _reconnectAttempt < _reconnectDelays.length
+        ? _reconnectAttempt
+        : _reconnectDelays.length - 1;
+
+    final delaySeconds = immediate ? 0 : _reconnectDelays[index];
+
+    if (!immediate && _reconnectAttempt < _reconnectDelays.length - 1) {
+      _reconnectAttempt++;
+    }
+
+    _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
+      _reconnectTimer = null;
+
+      if (_disposed ||
+          !_autoReconnectEnabled ||
+          !_isForeground ||
+          _connecting) {
+        return;
+      }
+
+      final socket = _socket;
+
+      if (socket != null && socket.readyState == WebSocket.open) {
+        return;
+      }
+
+      final host = _desiredHost;
+      if (host == null) return;
+
+      unawaited(_openConnection(host, automatic: true));
+    });
+  }
+
+  void _cancelReconnect() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+  }
+
+  // ==========================================
+  // WATCHDOG
+  // ==========================================
+
+  void _checkConnection() {
+    if (_disposed) return;
+
+    final socket = _socket;
+
+    if (!_connecting && socket != null && socket.readyState != WebSocket.open) {
+      _handleConnectionLost(_generation, 'Соединение с Windows Hub закрыто');
+      return;
+    }
+
+    if (_status == TelemetryConnectionStatus.connected) {
+      final lastReceived = _lastReceivedAt;
+
+      if (lastReceived != null &&
+          DateTime.now().difference(lastReceived) > telemetryTimeout) {
+        _clearTelemetry(preserveLastJobEvent: true);
+
+        _setStatus(
+          TelemetryConnectionStatus.stale,
+          'Нет новых данных от ETS2 / ATS',
+        );
+      }
+    }
+
+    if (_autoReconnectEnabled &&
+        _isForeground &&
+        !_connecting &&
+        _socket == null &&
+        _reconnectTimer == null) {
+      _scheduleReconnect();
+    }
+  }
+
+  // ==========================================
+  // DEVICE IDENTIFICATION
   // ==========================================
 
   Future<void> _sendDeviceHello(WebSocket socket, int generation) async {
@@ -319,7 +586,7 @@ class TelemetryConnection extends ChangeNotifier {
         }),
       );
     } catch (error) {
-      debugPrint('TruckLink client hello: $error');
+      debugPrint('TruckLink device hello: $error');
     }
   }
 
@@ -341,20 +608,19 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // CONNECTION ERRORS
+  // CONNECTION ERROR DESCRIPTION
   // ==========================================
 
   String _connectionErrorMessage(Object error, String host) {
     if (error is TimeoutException) {
       return 'ПК не ответил за '
           '${connectionTimeout.inSeconds} секунд. '
-          'Проверь IP-адрес и Windows Hub.';
+          'Повторим попытку автоматически.';
     }
 
     if (error is SocketException) {
-      return 'Не удалось подключиться к '
-          '$host:$serverPort. '
-          'Проверь адрес ПК и запущен ли сервер.';
+      return 'Windows Hub по адресу '
+          '$host:$serverPort недоступен.';
     }
 
     if (error is WebSocketException || error is HttpException) {
@@ -384,7 +650,7 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // SAVE CONFIRMED DELIVERY
+  // SAVE JOB HISTORY
   // ==========================================
 
   Future<void> _saveHistory(JobLifecycleMessage details) async {
@@ -395,23 +661,17 @@ class TelemetryConnection extends ChangeNotifier {
       return;
     }
 
-    final eventId = details.eventId;
+    final id = details.eventId;
     final time = details.occurredAtUtc;
     final job = details.finalJob;
 
-    if (eventId == null || time == null || job == null) {
-      debugPrint('TruckLink: no job archive data');
+    if (id == null || time == null || job == null) {
       return;
     }
 
     try {
       await JobHistoryStore.instance.addEntry(
-        JobHistoryEntry(
-          id: eventId,
-          result: event,
-          completedAtUtc: time,
-          job: job,
-        ),
+        JobHistoryEntry(id: id, result: event, completedAtUtc: time, job: job),
       );
     } catch (error) {
       debugPrint('TruckLink history save: $error');
@@ -419,52 +679,116 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // SAVE FINANCIAL OPERATION
+  // SAVE FINANCIAL EVENT
   // ==========================================
 
   Future<void> _saveFinance(FinanceEvent event) async {
     try {
       await FinanceStore.instance.addEvent(event);
-
-      debugPrint(
-        'TruckLink: saved finance event '
-        '${event.kind.name}: ${event.amount}',
-      );
     } catch (error) {
-      // Storage errors must not break
-      // the WebSocket connection.
       debugPrint('TruckLink finance save: $error');
     }
   }
 
   // ==========================================
-  // RECEIVE WEBSOCKET MESSAGES
+  // RECEIVE WEBSOCKET MESSAGE
   // ==========================================
 
   void _handleMessage(int generation, dynamic message) {
     try {
       if (message is! String) {
-        throw const FormatException('Expected text WebSocket message');
+        throw const FormatException('Expected WebSocket text message');
+      }
+
+      _lastMessageAt = DateTime.now();
+
+      // ======================================
+      // BEGIN ARCHIVE REPLAY
+      // ======================================
+
+      if (isEventSyncBeginMessage(message)) {
+        _expectedSyncCount = decodeEventSyncBegin(message);
+
+        _receivedSyncCount = 0;
+        _syncInProgress = true;
+
+        debugPrint(
+          'TruckLink: receiving '
+          '$_expectedSyncCount archived events',
+        );
+
+        _notify();
+        return;
       }
 
       // ======================================
-      // 1. FINANCIAL OPERATION
+      // END ARCHIVE REPLAY
+      // ======================================
+
+      if (isEventSyncEndMessage(message)) {
+        final count = decodeEventSyncEnd(message);
+
+        _syncInProgress = false;
+        _lastSyncCount = _receivedSyncCount;
+
+        if (count != _expectedSyncCount || count != _receivedSyncCount) {
+          debugPrint(
+            'TruckLink: incomplete event sync '
+            '($_receivedSyncCount/$count)',
+          );
+        } else {
+          debugPrint(
+            'TruckLink: synced '
+            '$_lastSyncCount archived events',
+          );
+        }
+
+        _notify();
+        return;
+      }
+
+      // ======================================
+      // FINANCIAL EVENT
       // ======================================
 
       if (isFinanceEventMessage(message)) {
         final event = decodeFinanceEvent(message);
 
+        if (_syncInProgress) {
+          _receivedSyncCount++;
+        }
+
+        // Store deduplicates by event.id.
         unawaited(_saveFinance(event));
 
         return;
       }
 
       // ======================================
-      // 2. JOB LIFECYCLE + HISTORY
+      // JOB LIFECYCLE EVENT
       // ======================================
 
       if (isJobEventMessage(message)) {
         final details = decodeJobEventDetails(message);
+
+        // ====================================
+        // ARCHIVED JOB RESULT
+        // ====================================
+
+        if (_syncInProgress) {
+          _receivedSyncCount++;
+
+          // Archived results must never
+          // clear a currently active delivery
+          // or show an old completion banner.
+          unawaited(_saveHistory(details));
+
+          return;
+        }
+
+        // ====================================
+        // NEW LIVE JOB
+        // ====================================
 
         final event = details.event;
 
@@ -480,6 +804,10 @@ class TelemetryConnection extends ChangeNotifier {
 
           return;
         }
+
+        // ====================================
+        // LIVE DELIVERY / CANCELLATION
+        // ====================================
 
         final finishedJob = details.finalJob ?? _activeJob;
 
@@ -498,12 +826,14 @@ class TelemetryConnection extends ChangeNotifier {
       }
 
       // ======================================
-      // 3. CURRENT JOB
+      // ACTIVE JOB UPDATE
       // ======================================
 
       if (isJobUpdateMessage(message)) {
         final nextJob = decodeJobUpdate(message);
 
+        // Ignore delayed data for a job
+        // that was already completed.
         if (nextJob != null &&
             _endedJobIdentity != null &&
             _jobIdentity(nextJob) == _endedJobIdentity) {
@@ -536,7 +866,7 @@ class TelemetryConnection extends ChangeNotifier {
       }
 
       // ======================================
-      // 4. ORDINARY TRUCK TELEMETRY
+      // ORDINARY TRUCK SNAPSHOT
       // ======================================
 
       final nextSnapshot = decodeSnapshot(message);
@@ -551,7 +881,7 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // PUBLISH LATEST SNAPSHOT
+  // PUBLISH SNAPSHOT
   // ==========================================
 
   void _publishPendingSnapshot() {
@@ -574,45 +904,25 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // TELEMETRY WATCHDOG
-  // ==========================================
-
-  void _checkFreshness() {
-    if (_disposed) return;
-
-    if (_status != TelemetryConnectionStatus.connected) {
-      return;
-    }
-
-    final received = _lastReceivedAt;
-
-    if (received == null) return;
-
-    if (DateTime.now().difference(received) > telemetryTimeout) {
-      _clearTelemetry(preserveLastJobEvent: true);
-
-      _setStatus(
-        TelemetryConnectionStatus.stale,
-        'Нет новых данных от ETS2 / ATS',
-      );
-    }
-  }
-
-  // ==========================================
-  // CONNECTION LOST
+  // CONNECTION WATCHDOG
   // ==========================================
 
   void _handleConnectionLost(int generation, String message) {
     if (!_isCurrent(generation)) return;
 
     ++_generation;
+    _connecting = false;
 
     _stopTransport();
     _clearTelemetry();
 
     _host = null;
+    _connectedAt = null;
+    _lastMessageAt = null;
 
     _setStatus(TelemetryConnectionStatus.error, message);
+
+    _scheduleReconnect();
   }
 
   // ==========================================
@@ -622,12 +932,21 @@ class TelemetryConnection extends ChangeNotifier {
   Future<void> disconnect() async {
     if (_disposed) return;
 
+    _autoReconnectEnabled = false;
+    _desiredHost = null;
+    _reconnectAttempt = 0;
+
+    _cancelReconnect();
+
     ++_generation;
+    _connecting = false;
 
     _stopTransport();
     _clearTelemetry();
 
     _host = null;
+    _connectedAt = null;
+    _lastMessageAt = null;
 
     _setStatus(
       TelemetryConnectionStatus.disconnected,
@@ -636,7 +955,7 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // TRANSPORT CLEANUP
+  // STOP TRANSPORT
   // ==========================================
 
   void _stopTransport() {
@@ -655,7 +974,7 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // CLEAR LIVE DATA
+  // CLEAR LIVE STATE
   // ==========================================
 
   void _clearTelemetry({bool preserveLastJobEvent = false}) {
@@ -664,14 +983,18 @@ class TelemetryConnection extends ChangeNotifier {
 
     _snapshot = null;
     _pendingSnapshot = null;
+
     _activeJob = null;
+    _lastReceivedAt = null;
+
+    _syncInProgress = false;
+    _expectedSyncCount = 0;
+    _receivedSyncCount = 0;
 
     if (!preserveLastJobEvent) {
       _lastJobEvent = null;
       _endedJobIdentity = null;
     }
-
-    _lastReceivedAt = null;
   }
 
   // ==========================================
@@ -687,7 +1010,6 @@ class TelemetryConnection extends ChangeNotifier {
 
     _status = status;
     _statusMessage = message;
-
     _notify();
   }
 
@@ -702,7 +1024,7 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // DISPOSE
+  // CLEANUP
   // ==========================================
 
   @override
@@ -711,6 +1033,11 @@ class TelemetryConnection extends ChangeNotifier {
 
     _disposed = true;
     ++_generation;
+
+    _autoReconnectEnabled = false;
+
+    _cancelReconnect();
+    _lifecycleListener.dispose();
 
     _watchdog?.cancel();
     _watchdog = null;

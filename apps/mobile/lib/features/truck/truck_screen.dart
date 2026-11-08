@@ -17,10 +17,15 @@ class TruckScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
+    // With Scaffold.extendBody, MediaQuery.padding.bottom
+    // includes the floating bottom navigation height.
+    // It also reacts to user appearance settings.
+    final navigationInset = MediaQuery.paddingOf(context).bottom;
+
     return ListView(
       key: const PageStorageKey<String>('trucklink-truck-scroll'),
       physics: const ClampingScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 32),
+      padding: EdgeInsets.fromLTRB(16, 20, 16, navigationInset + 32),
       children: [
         // ====================================
         // HEADER

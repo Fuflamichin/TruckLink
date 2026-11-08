@@ -6,6 +6,7 @@ import 'package:design_system/design_system.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:network_protocol/event_sync_protocol.dart';
 import 'package:network_protocol/finance_protocol.dart';
 import 'package:network_protocol/job_lifecycle_protocol.dart';
 import 'package:network_protocol/job_protocol.dart';
@@ -13,15 +14,12 @@ import 'package:network_protocol/network_protocol.dart';
 import 'package:telemetry_core/job_telemetry.dart';
 import 'package:telemetry_core/telemetry_core.dart';
 
+import 'services/hub_event_journal.dart';
 import 'services/scs_finance_reader.dart';
 import 'services/scs_job_bridge.dart';
 import 'services/scs_job_lifecycle_tracker.dart';
 import 'services/scs_plugin_detector.dart';
 import 'services/scs_telemetry_reader.dart';
-
-// ============================================
-// APPLICATION
-// ============================================
 
 void main() {
   runApp(const ProviderScope(child: DesktopApp()));
@@ -41,53 +39,41 @@ class DesktopApp extends StatelessWidget {
   }
 }
 
-// ============================================
-// CONNECTED DEVICE MODEL
-// ============================================
-
 class _ConnectedDevice {
   const _ConnectedDevice({
-    required this.ipAddress,
+    required this.ip,
     required this.connectedAt,
     this.name,
     this.platform,
   });
 
-  final String ipAddress;
+  final String ip;
   final DateTime connectedAt;
   final String? name;
   final String? platform;
 
-  _ConnectedDevice identified({
-    required String name,
-    required String platform,
-  }) {
-    return _ConnectedDevice(
-      ipAddress: ipAddress,
-      connectedAt: connectedAt,
-      name: name,
-      platform: platform,
-    );
-  }
-
   String get displayName {
-    final value = name;
-
-    return value == null || value.isEmpty ? 'Устройство $ipAddress' : value;
+    final candidate = name;
+    return candidate == null || candidate.isEmpty
+        ? 'Устройство $ip'
+        : candidate;
   }
 
   String get connectedTime {
     final hours = connectedAt.hour.toString().padLeft(2, '0');
-
     final minutes = connectedAt.minute.toString().padLeft(2, '0');
-
     return '$hours:$minutes';
   }
-}
 
-// ============================================
-// DESKTOP HOME
-// ============================================
+  _ConnectedDevice withIdentity(String newName, String newPlatform) {
+    return _ConnectedDevice(
+      ip: ip,
+      connectedAt: connectedAt,
+      name: newName,
+      platform: newPlatform,
+    );
+  }
+}
 
 class DesktopHome extends StatefulWidget {
   const DesktopHome({super.key});
@@ -104,93 +90,78 @@ class _DesktopHomeState extends State<DesktopHome> {
   static const int serverPort = 8787;
 
   static const Color _accent = Color(0xFF10EF78);
-
   static const Color _warning = Color(0xFFFFBA63);
-
   static const Color _muted = Color(0xFF9BAAB9);
-
   static const Color _surface = Color(0xFF15232F);
 
-  static const Duration _jobSendInterval = Duration(seconds: 1);
+  static const Duration _jobUpdateInterval = Duration(seconds: 1);
 
-  static const Duration _historyCandidateLifetime = Duration(seconds: 30);
+  static const Duration _jobCandidateLifetime = Duration(hours: 2);
 
   // ==========================================
-  // SCS SERVICES
+  // SERVICES
   // ==========================================
 
-  final ScsTelemetryReader _reader = ScsTelemetryReader();
+  final ScsTelemetryReader _telemetryReader = ScsTelemetryReader();
 
-  final ScsJobLifecycleTracker _lifecycle = ScsJobLifecycleTracker();
+  final ScsJobLifecycleTracker _jobTracker = ScsJobLifecycleTracker();
 
   final ScsFinanceReader _financeReader = ScsFinanceReader();
 
   final ScsPluginDetector _pluginDetector = const ScsPluginDetector();
 
+  late final Future<HubEventJournal?> _journalFuture;
+
+  // ==========================================
+  // TIMERS AND SERVER
+  // ==========================================
+
   Timer? _telemetryTimer;
   Timer? _pluginTimer;
-
-  // ==========================================
-  // LIVE TELEMETRY
-  // ==========================================
-
-  TruckSnapshot? _snapshot;
-
-  TruckLinkJobTelemetry? _activeJob;
-
-  int? _lastTimestamp;
-
-  DateTime? _lastFrameAt;
-
-  bool _telemetryActive = false;
-  bool _sharedMemoryAvailable = false;
-
-  String? _gameName;
-
-  String _gameStatus = 'Ожидание ETS2 / ATS';
-
-  // ==========================================
-  // JOB HISTORY
-  // ==========================================
-
-  TruckLinkJobTelemetry? _historyCandidate;
-
-  DateTime? _historyCandidateSeenAt;
-
-  DateTime? _lastJobBroadcastAt;
-
-  String? _lastJobBroadcastKey;
-
-  int _historyEventSequence = 0;
-
-  // ==========================================
-  // FINANCE HISTORY
-  // ==========================================
-
-  int _financeEventSequence = 0;
-
-  // ==========================================
-  // PLUGIN STATUS
-  // ==========================================
-
-  ScsPluginScanResult? _pluginReport;
-
-  bool _pluginChecking = false;
-
-  // ==========================================
-  // WEBSOCKET SERVER
-  // ==========================================
 
   HttpServer? _server;
 
   final Map<WebSocket, _ConnectedDevice> _clients = {};
 
-  bool _starting = false;
-  bool _stopping = false;
+  final Set<WebSocket> _syncingClients = {};
 
+  // ==========================================
+  // GAME TELEMETRY
+  // ==========================================
+
+  TruckSnapshot? _snapshot;
+  TruckLinkJobTelemetry? _activeJob;
+  TruckLinkJobTelemetry? _historyCandidate;
+
+  int? _lastTimestamp;
+
+  DateTime? _lastFrameAt;
+  DateTime? _historyCandidateAt;
+  DateTime? _lastJobSentAt;
+
+  String? _lastJobSentKey;
+
+  int _jobEventSerial = 0;
+  int _financeEventSerial = 0;
+
+  bool _telemetryActive = false;
+  bool _sharedMemoryAvailable = false;
+
+  // ==========================================
+  // HUB STATUS
+  // ==========================================
+
+  bool _serverStarting = false;
+  bool _serverStopping = false;
+  bool _pluginChecking = false;
+
+  String? _gameName;
+  String? _localIp;
+
+  String _gameStatus = 'Ожидание ETS2 / ATS';
   String _serverStatus = 'Сервер остановлен';
 
-  String? _localIp;
+  ScsPluginScanResult? _pluginReport;
 
   // ==========================================
   // INITIALIZATION
@@ -200,36 +171,59 @@ class _DesktopHomeState extends State<DesktopHome> {
   void initState() {
     super.initState();
 
+    _journalFuture = _openJournal();
+
     _telemetryTimer = Timer.periodic(
       const Duration(milliseconds: 200),
-      (_) => _readTelemetry(),
+      (_) => _pollTelemetry(),
     );
 
     _pluginTimer = Timer.periodic(
       const Duration(seconds: 30),
-      (_) => unawaited(_checkPlugin()),
+      (_) => unawaited(_scanPlugin()),
     );
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
 
-      _readTelemetry();
-
-      unawaited(_checkPlugin());
-      unawaited(_detectLocalIp());
+      _pollTelemetry();
+      unawaited(_scanPlugin());
+      unawaited(_findLocalIp());
     });
+  }
+
+  // ==========================================
+  // EVENT JOURNAL
+  // ==========================================
+
+  Future<HubEventJournal?> _openJournal() async {
+    try {
+      final journal = await HubEventJournal.open();
+
+      debugPrint(
+        'TruckLink: journal contains '
+        '${journal.eventCount} events',
+      );
+
+      return journal;
+    } catch (error) {
+      debugPrint(
+        'TruckLink: cannot open event journal: '
+        '$error',
+      );
+
+      return null;
+    }
   }
 
   // ==========================================
   // JOB IDENTITY
   // ==========================================
 
-  String _jobKey(TruckLinkJobTelemetry? job) {
-    if (job == null) {
-      return '<no-job>';
-    }
+  String _jobIdentity(TruckLinkJobTelemetry? job) {
+    if (job == null) return '<no-job>';
 
-    return jsonEncode([
+    return jsonEncode(<Object>[
       job.gameId,
       job.cargoId,
       job.cargoName,
@@ -242,48 +236,47 @@ class _DesktopHomeState extends State<DesktopHome> {
     ]);
   }
 
-  // ==========================================
-  // CLEAR HISTORY CANDIDATE
-  // ==========================================
-
   void _clearHistoryCandidate() {
     _historyCandidate = null;
-    _historyCandidateSeenAt = null;
+    _historyCandidateAt = null;
   }
 
   // ==========================================
-  // TELEMETRY UNAVAILABLE
+  // UNAVAILABLE TELEMETRY
   // ==========================================
 
-  void _setTelemetryUnavailable(
-    String message, {
+  void _setUnavailable(
+    String status, {
     String? gameName,
-    bool mappingAvailable = false,
+    bool memoryAvailable = false,
+    bool keepTimestamp = false,
   }) {
     final changed =
         _snapshot != null ||
         _activeJob != null ||
         _telemetryActive ||
-        _sharedMemoryAvailable != mappingAvailable ||
+        _sharedMemoryAvailable != memoryAvailable ||
         _gameName != gameName ||
-        _gameStatus != message;
+        _gameStatus != status;
 
     final hadJob = _activeJob != null;
 
     _snapshot = null;
     _activeJob = null;
 
-    _lastTimestamp = null;
-    _lastFrameAt = null;
-
     _telemetryActive = false;
-    _sharedMemoryAvailable = mappingAvailable;
+    _sharedMemoryAvailable = memoryAvailable;
 
     _gameName = gameName;
-    _gameStatus = message;
+    _gameStatus = status;
+
+    if (!keepTimestamp) {
+      _lastTimestamp = null;
+      _lastFrameAt = null;
+    }
 
     if (hadJob) {
-      _broadcastJob(null);
+      _sendJobUpdate(null);
     }
 
     if (changed && mounted) {
@@ -292,142 +285,75 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // STALE TELEMETRY
+  // POLL ALL SCS TELEMETRY
   // ==========================================
 
-  void _markTelemetryStale(String? gameName) {
-    final changed =
-        _snapshot != null ||
-        _activeJob != null ||
-        _telemetryActive ||
-        _gameStatus != 'Нет новых данных от игры';
+  void _pollTelemetry() {
+    if (!mounted) return;
 
-    final hadJob = _activeJob != null;
-
-    _snapshot = null;
-    _activeJob = null;
-
-    // Keep _lastTimestamp unchanged.
-    // Otherwise a frozen frame may repeatedly
-    // appear to be fresh.
-    _telemetryActive = false;
-    _sharedMemoryAvailable = true;
-
-    _gameName = gameName;
-    _gameStatus = 'Нет новых данных от игры';
-
-    if (hadJob) {
-      _broadcastJob(null);
-    }
-
-    if (changed && mounted) {
-      setState(() {});
-    }
-  }
-
-  // ==========================================
-  // FINANCE READER
-  // ==========================================
-
-  void _readFinanceEvents() {
+    // Financial flags are read separately.
+    // They can change when the ordinary
+    // truck timestamp is unchanged.
     try {
-      final occurrences = _financeReader.poll();
+      final financeEvents = _financeReader.poll();
 
-      for (final occurrence in occurrences) {
-        _broadcastFinanceEvent(occurrence);
+      for (final occurrence in financeEvents) {
+        _recordFinanceEvent(occurrence);
       }
     } catch (error) {
-      debugPrint('TruckLink finance reader: $error');
+      debugPrint('TruckLink: finance poll failed: $error');
 
       _financeReader.reset();
     }
-  }
-
-  // ==========================================
-  // FINANCE EVENT BROADCAST
-  // ==========================================
-
-  void _broadcastFinanceEvent(ScsFinanceOccurrence occurrence) {
-    if (_server == null) return;
-
-    final now = DateTime.now().toUtc();
-
-    _financeEventSequence++;
-
-    final event = FinanceEvent(
-      id:
-          'fin-$pid-${now.microsecondsSinceEpoch}'
-          '-$_financeEventSequence',
-      gameId: occurrence.gameId,
-      kind: occurrence.kind,
-      amount: occurrence.signedAmount,
-      occurredAtUtc: now,
-    );
-
-    _sendToAll(encodeFinanceEvent(event));
-
-    debugPrint(
-      'TruckLink finance: '
-      '${event.kind.name} ${event.amount}',
-    );
-  }
-
-  // ==========================================
-  // READ GAME TELEMETRY
-  // ==========================================
-
-  void _readTelemetry() {
-    if (!mounted) return;
-
-    // Financial events are processed separately
-    // because their flags can change without
-    // a new ordinary telemetry timestamp.
-    _readFinanceEvents();
 
     try {
-      final frame = _reader.read();
+      final frame = _telemetryReader.read();
 
       // ======================================
-      // NO GAME
+      // GAME IS NOT RUNNING
       // ======================================
 
       if (frame == null) {
-        _lifecycle.reset();
+        _jobTracker.reset();
         _clearHistoryCandidate();
 
-        _setTelemetryUnavailable('Ожидание запуска игры');
+        _setUnavailable('Ожидание запуска игры');
 
         return;
       }
 
-      final gameName = switch (frame.gameId) {
-        1 => 'Euro Truck Simulator 2',
-        2 => 'American Truck Simulator',
-        _ => null,
-      };
+      final String? gameName;
+
+      if (frame.gameId == 1) {
+        gameName = 'Euro Truck Simulator 2';
+      } else if (frame.gameId == 2) {
+        gameName = 'American Truck Simulator';
+      } else {
+        gameName = null;
+      }
 
       // ======================================
       // SDK INACTIVE
       // ======================================
 
       if (!frame.sdkActive) {
-        _lifecycle.reset();
+        _jobTracker.reset();
         _clearHistoryCandidate();
 
-        _setTelemetryUnavailable(
+        _setUnavailable(
           'SDK обнаружен, но не активен',
           gameName: gameName,
-          mappingAvailable: true,
+          memoryAvailable: true,
         );
 
         return;
       }
 
       // ======================================
-      // JOB LIFECYCLE EVENTS
+      // JOB LIFECYCLE
       // ======================================
 
-      final event = _lifecycle.observe(
+      final jobEvent = _jobTracker.observe(
         gameId: frame.gameId,
         onJob: frame.hasActiveJob,
         deliveredFlag: frame.jobDeliveredEventFlag,
@@ -437,45 +363,31 @@ class _DesktopHomeState extends State<DesktopHome> {
       final observedJob = jobTelemetryFromScs(frame);
 
       final terminal =
-          event == JobLifecycleEventKind.delivered ||
-          event == JobLifecycleEventKind.cancelled;
+          jobEvent == JobLifecycleEventKind.delivered ||
+          jobEvent == JobLifecycleEventKind.cancelled;
+
+      if (jobEvent == JobLifecycleEventKind.started) {
+        _clearHistoryCandidate();
+      }
 
       if (!terminal && observedJob != null) {
         _historyCandidate = observedJob;
-        _historyCandidateSeenAt = DateTime.now();
+        _historyCandidateAt = DateTime.now();
       }
 
       // ======================================
-      // GAME PAUSED
+      // PAUSED / INACTIVE GAME
       // ======================================
 
-      if (frame.paused) {
-        _setTelemetryUnavailable(
-          'Игра на паузе',
+      if (frame.paused || !frame.isLive) {
+        _setUnavailable(
+          frame.paused ? 'Игра на паузе' : 'Ожидание игровых данных',
           gameName: gameName,
-          mappingAvailable: true,
+          memoryAvailable: true,
         );
 
-        if (event != null) {
-          _broadcastJobEvent(event, gameId: frame.gameId);
-        }
-
-        return;
-      }
-
-      // ======================================
-      // NOT LIVE
-      // ======================================
-
-      if (!frame.isLive) {
-        _setTelemetryUnavailable(
-          'Ожидание игровых данных',
-          gameName: gameName,
-          mappingAvailable: true,
-        );
-
-        if (event != null) {
-          _broadcastJobEvent(event, gameId: frame.gameId);
+        if (jobEvent != null) {
+          _recordJobEvent(jobEvent, frame.gameId);
         }
 
         return;
@@ -483,47 +395,52 @@ class _DesktopHomeState extends State<DesktopHome> {
 
       final now = DateTime.now();
 
-      final hasNewTimestamp = _lastTimestamp != frame.timestamp;
-
-      final lastFrame = _lastFrameAt;
+      final newTimestamp = _lastTimestamp != frame.timestamp;
 
       // ======================================
-      // FROZEN FRAME
+      // STALE FRAME PROTECTION
       // ======================================
 
-      if (!hasNewTimestamp &&
-          lastFrame != null &&
-          now.difference(lastFrame) > const Duration(seconds: 4)) {
-        _markTelemetryStale(gameName);
+      if (!newTimestamp &&
+          _lastFrameAt != null &&
+          now.difference(_lastFrameAt!) > const Duration(seconds: 4)) {
+        _setUnavailable(
+          'Нет новых данных от игры',
+          gameName: gameName,
+          memoryAvailable: true,
+          keepTimestamp: true,
+        );
 
-        if (event != null) {
-          _broadcastJobEvent(event, gameId: frame.gameId);
+        if (jobEvent != null) {
+          _recordJobEvent(jobEvent, frame.gameId);
         }
 
         return;
       }
 
       // ======================================
-      // TRUCK SNAPSHOT
+      // ORDINARY TRUCK DATA
       // ======================================
 
-      if (hasNewTimestamp) {
+      if (newTimestamp) {
         _lastTimestamp = frame.timestamp;
         _lastFrameAt = now;
 
         _snapshot = frame.toTruckSnapshot();
+
+        _sendSnapshot();
       }
 
       // ======================================
-      // ACTIVE JOB
+      // CURRENT JOB
       // ======================================
 
-      final oldJobKey = _jobKey(_activeJob);
-      final newJobKey = _jobKey(observedJob);
+      final oldKey = _jobIdentity(_activeJob);
+      final newKey = _jobIdentity(observedJob);
 
       _activeJob = observedJob;
 
-      final updateUi =
+      final shouldRefreshUi =
           !_telemetryActive ||
           !_sharedMemoryAvailable ||
           _gameName != gameName ||
@@ -535,145 +452,184 @@ class _DesktopHomeState extends State<DesktopHome> {
       _gameName = gameName;
       _gameStatus = 'Телеметрия активна';
 
-      // ======================================
-      // TRUCK BROADCAST
-      // ======================================
-
-      if (hasNewTimestamp) {
-        _broadcastSnapshot();
+      if (newTimestamp || oldKey != newKey || jobEvent != null) {
+        _sendJobUpdate(observedJob);
       }
 
-      // ======================================
-      // JOB BROADCAST
-      // ======================================
-
-      if (hasNewTimestamp || oldJobKey != newJobKey || event != null) {
-        _broadcastJob(observedJob);
+      if (jobEvent != null) {
+        _recordJobEvent(jobEvent, frame.gameId);
       }
 
-      // ======================================
-      // LIFECYCLE BROADCAST
-      // ======================================
-
-      if (event != null) {
-        _broadcastJobEvent(event, gameId: frame.gameId);
-      }
-
-      if (updateUi && mounted) {
+      if (shouldRefreshUi && mounted) {
         setState(() {});
       }
     } catch (error) {
-      _lifecycle.reset();
+      _jobTracker.reset();
       _clearHistoryCandidate();
 
-      _setTelemetryUnavailable('Ошибка чтения: $error');
+      _setUnavailable('Ошибка чтения: $error');
     }
   }
 
   // ==========================================
-  // BROADCAST TRUCK SNAPSHOT
+  // BROADCAST SNAPSHOT
   // ==========================================
 
-  void _broadcastSnapshot() {
-    final snapshot = _snapshot;
-
-    if (_server == null || snapshot == null) {
+  void _sendSnapshot() {
+    if (_server == null || _snapshot == null) {
       return;
     }
 
-    _sendToAll(encodeSnapshot(snapshot));
+    _sendAll(encodeSnapshot(_snapshot!));
   }
 
   // ==========================================
   // BROADCAST CURRENT JOB
   // ==========================================
 
-  void _broadcastJob(TruckLinkJobTelemetry? job) {
+  void _sendJobUpdate(TruckLinkJobTelemetry? job) {
     if (_server == null) return;
 
-    final key = _jobKey(job);
     final now = DateTime.now();
+    final identity = _jobIdentity(job);
 
-    final changed = key != _lastJobBroadcastKey;
+    final changed = identity != _lastJobSentKey;
 
-    final previous = _lastJobBroadcastAt;
+    final allowedByTime =
+        _lastJobSentAt == null ||
+        now.difference(_lastJobSentAt!) >= _jobUpdateInterval;
 
-    final intervalElapsed =
-        previous == null || now.difference(previous) >= _jobSendInterval;
-
-    if (!changed && (job == null || !intervalElapsed)) {
+    if (!changed && (job == null || !allowedByTime)) {
       return;
     }
 
-    _lastJobBroadcastKey = key;
-    _lastJobBroadcastAt = now;
+    _lastJobSentKey = identity;
+    _lastJobSentAt = now;
 
-    _sendToAll(encodeJobUpdate(job));
+    _sendAll(encodeJobUpdate(job));
   }
 
   // ==========================================
-  // JOB RESULT AND HISTORY
+  // JOB LIFECYCLE EVENT
   // ==========================================
 
-  void _broadcastJobEvent(JobLifecycleEventKind event, {required int gameId}) {
+  void _recordJobEvent(JobLifecycleEventKind kind, int gameId) {
     final terminal =
-        event == JobLifecycleEventKind.delivered ||
-        event == JobLifecycleEventKind.cancelled;
+        kind == JobLifecycleEventKind.delivered ||
+        kind == JobLifecycleEventKind.cancelled;
 
-    final now = DateTime.now();
+    final now = DateTime.now().toUtc();
 
-    TruckLinkJobTelemetry? completedJob;
-    String? eventId;
+    TruckLinkJobTelemetry? finalJob;
 
-    if (terminal) {
-      final candidate = _historyCandidate;
-      final seenAt = _historyCandidateSeenAt;
+    if (terminal &&
+        _historyCandidate != null &&
+        _historyCandidate!.gameId == gameId &&
+        _historyCandidateAt != null) {
+      final age = DateTime.now().difference(_historyCandidateAt!);
 
-      if (candidate != null && candidate.gameId == gameId && seenAt != null) {
-        final age = now.difference(seenAt);
-
-        if (!age.isNegative && age <= _historyCandidateLifetime) {
-          completedJob = candidate;
-        }
-      }
-
-      if (completedJob != null) {
-        _historyEventSequence++;
-
-        eventId =
-            'job-$pid-${now.microsecondsSinceEpoch}'
-            '-$_historyEventSequence';
+      if (!age.isNegative && age <= _jobCandidateLifetime) {
+        finalJob = _historyCandidate;
       }
     }
 
-    _sendToAll(
-      encodeJobEvent(
-        event,
-        eventId: eventId,
-        occurredAtUtc: eventId == null ? null : now.toUtc(),
-        finalJob: completedJob,
-      ),
+    String? id;
+
+    if (terminal && finalJob != null) {
+      _jobEventSerial++;
+
+      id =
+          'job-$pid-${now.microsecondsSinceEpoch}'
+          '-$_jobEventSerial';
+    }
+
+    final message = encodeJobEvent(
+      kind,
+      eventId: id,
+      occurredAtUtc: id == null ? null : now,
+      finalJob: finalJob,
     );
 
-    debugPrint('TruckLink job event: ${event.name}');
+    if (id != null) {
+      unawaited(_saveAndSend(id, message));
+    } else {
+      _sendAll(message);
+    }
 
     if (terminal) {
       _clearHistoryCandidate();
     }
+
+    debugPrint('TruckLink: job event ${kind.name}');
   }
 
   // ==========================================
-  // SEND TO ALL PHONES
+  // FINANCIAL EVENT
   // ==========================================
 
-  void _sendToAll(String message) {
+  void _recordFinanceEvent(ScsFinanceOccurrence occurrence) {
+    final now = DateTime.now().toUtc();
+
+    _financeEventSerial++;
+
+    final event = FinanceEvent(
+      id:
+          'fin-$pid-${now.microsecondsSinceEpoch}'
+          '-$_financeEventSerial',
+      gameId: occurrence.gameId,
+      kind: occurrence.kind,
+      amount: occurrence.signedAmount,
+      occurredAtUtc: now,
+    );
+
+    unawaited(_saveAndSend(event.id, encodeFinanceEvent(event)));
+
+    debugPrint(
+      'TruckLink: finance '
+      '${event.kind.name} ${event.amount}',
+    );
+  }
+
+  // ==========================================
+  // SAVE TO JOURNAL THEN BROADCAST
+  // ==========================================
+
+  Future<void> _saveAndSend(String id, String message) async {
+    try {
+      final journal = await _journalFuture;
+
+      if (journal != null) {
+        await journal.add(id: id, message: message);
+      } else {
+        debugPrint(
+          'TruckLink: journal unavailable, '
+          'event is live-only',
+        );
+      }
+    } catch (error) {
+      debugPrint('TruckLink: cannot archive $id: $error');
+    }
+
+    if (mounted) {
+      _sendAll(message);
+    }
+  }
+
+  // ==========================================
+  // SEND MESSAGE TO ALL CONNECTED CLIENTS
+  // ==========================================
+
+  void _sendAll(String message) {
     if (_server == null) return;
 
     for (final socket in _clients.keys.toList()) {
       try {
         socket.add(message);
       } catch (error) {
-        debugPrint('TruckLink WebSocket send: $error');
+        debugPrint(
+          'TruckLink: WebSocket send error: '
+          '$error',
+        );
 
         _removeClient(socket);
       }
@@ -681,10 +637,58 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
+  // REPLAY EVENT JOURNAL TO ONE CLIENT
+  // ==========================================
+
+  Future<void> _replayEvents(WebSocket socket) async {
+    if (!_syncingClients.add(socket)) {
+      return;
+    }
+
+    try {
+      final journal = await _journalFuture;
+
+      if (journal == null) {
+        return;
+      }
+
+      final messages = await journal.replayMessages();
+
+      if (!mounted || _server == null || !_clients.containsKey(socket)) {
+        return;
+      }
+
+      // All three steps are performed without
+      // awaiting between them to preserve
+      // the ordering of the replay batch.
+      socket.add(encodeEventSyncBegin(eventCount: messages.length));
+
+      for (final message in messages) {
+        socket.add(message);
+      }
+
+      socket.add(encodeEventSyncEnd(eventCount: messages.length));
+
+      debugPrint(
+        'TruckLink: replayed '
+        '${messages.length} events',
+      );
+    } catch (error) {
+      debugPrint('TruckLink: event sync failed: $error');
+
+      _removeClient(socket);
+
+      unawaited(socket.close());
+    } finally {
+      _syncingClients.remove(socket);
+    }
+  }
+
+  // ==========================================
   // PLUGIN DETECTION
   // ==========================================
 
-  Future<void> _checkPlugin() async {
+  Future<void> _scanPlugin() async {
     if (!mounted || _pluginChecking) return;
 
     setState(() {
@@ -692,21 +696,24 @@ class _DesktopHomeState extends State<DesktopHome> {
     });
 
     try {
-      final result = await _pluginDetector.scan();
+      final report = await _pluginDetector.scan();
 
-      if (!mounted) return;
-
-      setState(() {
-        _pluginReport = result;
-      });
+      if (mounted) {
+        setState(() {
+          _pluginReport = report;
+        });
+      }
     } catch (error) {
-      debugPrint('TruckLink plugin scan: $error');
+      debugPrint(
+        'TruckLink: plugin detection error: '
+        '$error',
+      );
 
-      if (!mounted) return;
-
-      setState(() {
-        _pluginReport = null;
-      });
+      if (mounted) {
+        setState(() {
+          _pluginReport = null;
+        });
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -717,63 +724,64 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // DETECT LOCAL IP
+  // LOCAL IP DETECTION
   // ==========================================
 
-  Future<void> _detectLocalIp() async {
+  Future<void> _findLocalIp() async {
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
         includeLoopback: false,
       );
 
-      final addresses = <String>[
-        for (final interface in interfaces)
-          for (final address in interface.addresses) address.address,
-      ];
+      final addresses = <String>[];
 
-      bool isPrivate(String address) {
-        if (address.startsWith('192.168.') || address.startsWith('10.')) {
-          return true;
+      for (final networkInterface in interfaces) {
+        for (final address in networkInterface.addresses) {
+          addresses.add(address.address);
         }
-
-        final parts = address.split('.');
-
-        if (parts.length != 4 || parts[0] != '172') {
-          return false;
-        }
-
-        final second = int.tryParse(parts[1]);
-
-        return second != null && second >= 16 && second <= 31;
       }
 
-      final privateAddresses = addresses.where(isPrivate).toList();
+      String? selected;
 
-      final ip = privateAddresses.isNotEmpty
-          ? privateAddresses.first
-          : addresses.isEmpty
-          ? null
-          : addresses.first;
+      for (final address in addresses) {
+        if (address.startsWith('192.168.') || address.startsWith('10.')) {
+          selected = address;
+          break;
+        }
+
+        final octets = address.split('.');
+
+        if (octets.length == 4 && octets.first == '172') {
+          final second = int.tryParse(octets[1]);
+
+          if (second != null && second >= 16 && second <= 31) {
+            selected = address;
+            break;
+          }
+        }
+      }
+
+      if (selected == null && addresses.isNotEmpty) {
+        selected = addresses.first;
+      }
 
       if (mounted) {
         setState(() {
-          _localIp = ip;
+          _localIp = selected;
         });
       }
     } catch (error) {
-      debugPrint('TruckLink IP detection: $error');
+      debugPrint('TruckLink: IP detection error: $error');
     }
   }
 
   String get _serverAddress {
-    final ip = _localIp;
-
-    if (ip == null) {
+    if (_localIp == null) {
       return 'IP компьютера · порт $serverPort';
     }
 
-    return 'ws://$ip:$serverPort';
+    return 'ws://$_localIp:$serverPort';
   }
 
   // ==========================================
@@ -781,12 +789,12 @@ class _DesktopHomeState extends State<DesktopHome> {
   // ==========================================
 
   Future<void> _startServer() async {
-    if (_server != null || _starting || _stopping) {
+    if (_server != null || _serverStarting || _serverStopping) {
       return;
     }
 
     setState(() {
-      _starting = true;
+      _serverStarting = true;
       _serverStatus = 'Запуск сервера...';
     });
 
@@ -800,8 +808,8 @@ class _DesktopHomeState extends State<DesktopHome> {
 
       _server = server;
 
-      _lastJobBroadcastAt = null;
-      _lastJobBroadcastKey = null;
+      _lastJobSentAt = null;
+      _lastJobSentKey = null;
 
       setState(() {
         _serverStatus = 'Сервер запущен';
@@ -809,6 +817,10 @@ class _DesktopHomeState extends State<DesktopHome> {
 
       server.listen(
         (request) async {
+          // ==================================
+          // WEBSOCKET HANDSHAKE
+          // ==================================
+
           if (!WebSocketTransformer.isUpgradeRequest(request)) {
             request.response.statusCode = HttpStatus.badRequest;
 
@@ -828,23 +840,21 @@ class _DesktopHomeState extends State<DesktopHome> {
             }
 
             _clients[socket] = _ConnectedDevice(
-              ipAddress: remoteIp,
+              ip: remoteIp,
               connectedAt: DateTime.now(),
             );
 
-            // Immediately send current state.
-            // Historical events are not replayed.
-            final snapshot = _snapshot;
-
-            if (snapshot != null) {
-              socket.add(encodeSnapshot(snapshot));
+            // Send the current game state to
+            // the newly connected phone.
+            if (_snapshot != null) {
+              socket.add(encodeSnapshot(_snapshot!));
             }
 
             socket.add(encodeJobUpdate(_activeJob));
 
             socket.listen(
-              (message) {
-                _handleClientMessage(socket, message);
+              (data) {
+                _handleClientMessage(socket, data);
               },
               onDone: () {
                 _removeClient(socket);
@@ -860,13 +870,13 @@ class _DesktopHomeState extends State<DesktopHome> {
             }
           } catch (error) {
             debugPrint(
-              'TruckLink WebSocket handshake: '
-              '$error',
+              'TruckLink: WebSocket upgrade '
+              'error: $error',
             );
           }
         },
         onError: (Object error) {
-          debugPrint('TruckLink server: $error');
+          debugPrint('TruckLink: server error: $error');
         },
         onDone: () {
           if (!mounted || !identical(_server, server)) {
@@ -880,7 +890,7 @@ class _DesktopHomeState extends State<DesktopHome> {
         },
       );
 
-      unawaited(_detectLocalIp());
+      unawaited(_findLocalIp());
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -890,79 +900,104 @@ class _DesktopHomeState extends State<DesktopHome> {
     } finally {
       if (mounted) {
         setState(() {
-          _starting = false;
+          _serverStarting = false;
         });
       }
     }
   }
 
   // ==========================================
-  // CLIENT HELLO
+  // HANDLE PHONE MESSAGES
   // ==========================================
 
-  void _handleClientMessage(WebSocket socket, dynamic message) {
-    if (message is! String || message.length > 1024) {
+  void _handleClientMessage(WebSocket socket, dynamic data) {
+    if (data is! String || data.length > 1024) {
       return;
     }
 
     try {
-      final data = jsonDecode(message);
+      // ======================================
+      // EVENT SYNCHRONIZATION REQUEST
+      // ======================================
 
-      if (data is! Map<String, dynamic> || data['type'] != 'client_hello') {
+      if (isEventSyncRequestMessage(data)) {
+        decodeEventSyncRequest(data);
+
+        unawaited(_replayEvents(socket));
+
         return;
       }
 
-      final rawName = data['name'];
+      // ======================================
+      // CLIENT IDENTIFICATION
+      // ======================================
 
-      if (rawName is! String) return;
+      final decoded = jsonDecode(data);
 
-      final name = _cleanLabel(rawName, 64);
+      if (decoded is! Map<String, dynamic> ||
+          decoded['type'] != 'client_hello') {
+        return;
+      }
+
+      final rawName = decoded['name'];
+
+      if (rawName is! String) {
+        return;
+      }
+
+      final name = _safeLabel(rawName, 64);
 
       if (name.isEmpty) return;
 
-      final rawPlatform = data['platform'];
+      final rawPlatform = decoded['platform'];
 
-      final platform = rawPlatform is String
-          ? _cleanLabel(rawPlatform, 20)
-          : '';
+      final platform = rawPlatform is String ? _safeLabel(rawPlatform, 20) : '';
 
-      final previous = _clients[socket];
+      final oldDevice = _clients[socket];
 
-      if (previous == null) return;
+      if (oldDevice == null) return;
 
-      if (previous.name == name && previous.platform == platform) {
+      if (oldDevice.name == name && oldDevice.platform == platform) {
         return;
       }
 
-      _clients[socket] = previous.identified(name: name, platform: platform);
+      _clients[socket] = oldDevice.withIdentity(name, platform);
 
       if (mounted) {
         setState(() {});
       }
     } on FormatException {
-      // Ignore malformed identification data.
+      // Ignore malformed client input.
     } catch (error) {
-      debugPrint('TruckLink client identification: $error');
+      debugPrint('TruckLink: bad client message: $error');
     }
   }
 
-  String _cleanLabel(String value, int maxLength) {
-    final cleaned = value
+  // ==========================================
+  // SAFE DEVICE NAME
+  // ==========================================
+
+  String _safeLabel(String text, int maximumLength) {
+    final cleaned = text
         .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
 
-    return cleaned.length <= maxLength
-        ? cleaned
-        : cleaned.substring(0, maxLength);
+    if (cleaned.length <= maximumLength) {
+      return cleaned;
+    }
+
+    return cleaned.substring(0, maximumLength);
   }
 
   // ==========================================
-  // REMOVE DEVICE
+  // REMOVE CLIENT
   // ==========================================
 
   void _removeClient(WebSocket socket) {
     final removed = _clients.remove(socket) != null;
+
+    _syncingClients.remove(socket);
 
     if (removed && mounted) {
       setState(() {});
@@ -970,18 +1005,18 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // STOP SERVER
+  // STOP WEBSOCKET SERVER
   // ==========================================
 
   Future<void> _stopServer() async {
     final server = _server;
 
-    if (server == null || _stopping) {
+    if (server == null || _serverStopping) {
       return;
     }
 
     setState(() {
-      _stopping = true;
+      _serverStopping = true;
       _serverStatus = 'Остановка сервера...';
     });
 
@@ -992,22 +1027,23 @@ class _DesktopHomeState extends State<DesktopHome> {
         try {
           await socket.close().timeout(const Duration(seconds: 2));
         } catch (_) {
-          // The socket may already be closed.
+          // Client is already disconnected.
         }
       }
 
       _clients.clear();
+      _syncingClients.clear();
 
       await server.close(force: true);
     } catch (error) {
-      debugPrint('TruckLink server stop: $error');
+      debugPrint('TruckLink: server stop error: $error');
     } finally {
-      _lastJobBroadcastAt = null;
-      _lastJobBroadcastKey = null;
+      _lastJobSentAt = null;
+      _lastJobSentKey = null;
 
       if (mounted) {
         setState(() {
-          _stopping = false;
+          _serverStopping = false;
           _serverStatus = 'Сервер остановлен';
         });
       }
@@ -1020,11 +1056,14 @@ class _DesktopHomeState extends State<DesktopHome> {
 
   Future<void> _openPluginDownload() async {
     try {
-      await Process.start('explorer.exe', [
+      await Process.start('explorer.exe', <String>[
         ScsPluginDetector.downloadUrl,
       ], mode: ProcessStartMode.detached);
     } catch (error) {
-      debugPrint('TruckLink plugin download: $error');
+      debugPrint(
+        'TruckLink: cannot open plugin page: '
+        '$error',
+      );
 
       if (!mounted) return;
 
@@ -1079,17 +1118,19 @@ class _DesktopHomeState extends State<DesktopHome> {
       return 'Проверь библиотеки Steam';
     }
 
-    return report.games
-        .map((game) {
-          final status = game.pluginInstalled ? 'найден' : 'отсутствует';
+    final parts = <String>[];
 
-          return '${game.name}: $status';
-        })
-        .join(' · ');
+    for (final game in report.games) {
+      final label = game.pluginInstalled ? 'найден' : 'отсутствует';
+
+      parts.add('${game.name}: $label');
+    }
+
+    return parts.join(' · ');
   }
 
   // ==========================================
-  // CARD HELPERS
+  // UI CARD HELPERS
   // ==========================================
 
   Widget _card(Widget child) {
@@ -1121,7 +1162,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   // GAME CARD
   // ==========================================
 
-  Widget _buildGameCard() {
+  Widget _gameCard() {
     return _card(
       Row(
         children: [
@@ -1129,7 +1170,9 @@ class _DesktopHomeState extends State<DesktopHome> {
             Icons.sports_esports_outlined,
             _telemetryActive ? _accent : _warning,
           ),
+
           const SizedBox(width: 12),
+
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1138,15 +1181,19 @@ class _DesktopHomeState extends State<DesktopHome> {
                   'ИГРА',
                   style: TextStyle(color: _muted, fontSize: 11),
                 ),
+
                 const SizedBox(height: 4),
+
                 Text(
                   _gameName ?? 'ETS2 / ATS',
                   style: const TextStyle(
-                    fontWeight: FontWeight.w700,
                     fontSize: 15,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
+
                 const SizedBox(height: 4),
+
                 Text(
                   _gameStatus,
                   maxLines: 2,
@@ -1165,7 +1212,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   // PLUGIN CARD
   // ==========================================
 
-  Widget _buildPluginCard() {
+  Widget _pluginCard() {
     final report = _pluginReport;
 
     final ready =
@@ -1173,70 +1220,80 @@ class _DesktopHomeState extends State<DesktopHome> {
         _sharedMemoryAvailable ||
         report?.allInstalled == true;
 
-    final offerDownload =
+    final needsDownload =
         !_telemetryActive &&
         !_sharedMemoryAvailable &&
         (report == null || !report.hasGames || report.hasMissingPlugin);
 
+    final children = <Widget>[
+      Row(
+        children: [
+          _statusIcon(Icons.extension_outlined, ready ? _accent : _warning),
+
+          const SizedBox(width: 12),
+
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'ПЛАГИН ТЕЛЕМЕТРИИ',
+                  style: TextStyle(color: _muted, fontSize: 11),
+                ),
+
+                const SizedBox(height: 4),
+
+                Text(
+                  _pluginStatus,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                  ),
+                ),
+
+                const SizedBox(height: 4),
+
+                Text(
+                  _pluginDetails,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: _muted, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+
+          IconButton(
+            tooltip: 'Проверить снова',
+            onPressed: _pluginChecking ? null : () => unawaited(_scanPlugin()),
+            icon: _pluginChecking
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.refresh_rounded, size: 19),
+          ),
+        ],
+      ),
+    ];
+
+    if (needsDownload) {
+      children.add(const SizedBox(height: 10));
+
+      children.add(
+        OutlinedButton.icon(
+          onPressed: () => unawaited(_openPluginDownload()),
+          icon: const Icon(Icons.open_in_new_rounded, size: 18),
+          label: const Text('Скачать / установить плагин'),
+        ),
+      );
+    }
+
     return _card(
       Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              _statusIcon(Icons.extension_outlined, ready ? _accent : _warning),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'ПЛАГИН ТЕЛЕМЕТРИИ',
-                      style: TextStyle(color: _muted, fontSize: 11),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      _pluginStatus,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 14,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      _pluginDetails,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: _muted, fontSize: 12),
-                    ),
-                  ],
-                ),
-              ),
-              IconButton(
-                tooltip: 'Проверить снова',
-                onPressed: _pluginChecking
-                    ? null
-                    : () => unawaited(_checkPlugin()),
-                icon: _pluginChecking
-                    ? const SizedBox(
-                        height: 18,
-                        width: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.refresh_rounded, size: 19),
-              ),
-            ],
-          ),
-
-          if (offerDownload) ...[
-            const SizedBox(height: 10),
-            OutlinedButton.icon(
-              onPressed: () => unawaited(_openPluginDownload()),
-              icon: const Icon(Icons.open_in_new_rounded, size: 18),
-              label: const Text('Скачать / установить плагин'),
-            ),
-          ],
-        ],
+        children: children,
       ),
     );
   }
@@ -1245,9 +1302,22 @@ class _DesktopHomeState extends State<DesktopHome> {
   // SERVER CARD
   // ==========================================
 
-  Widget _buildServerCard() {
+  Widget _serverCard() {
     final running = _server != null;
-    final busy = _starting || _stopping;
+
+    final busy = _serverStarting || _serverStopping;
+
+    // Explicit button action instead of
+    // deeply nested ternary expressions.
+    final VoidCallback? action;
+
+    if (busy) {
+      action = null;
+    } else if (running) {
+      action = () => unawaited(_stopServer());
+    } else {
+      action = () => unawaited(_startServer());
+    }
 
     return _card(
       Column(
@@ -1256,7 +1326,9 @@ class _DesktopHomeState extends State<DesktopHome> {
           Row(
             children: [
               _statusIcon(Icons.wifi_tethering, running ? _accent : _warning),
+
               const SizedBox(width: 12),
+
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1265,7 +1337,9 @@ class _DesktopHomeState extends State<DesktopHome> {
                       'WEBSOCKET HUB',
                       style: TextStyle(color: _muted, fontSize: 11),
                     ),
+
                     const SizedBox(height: 4),
+
                     Text(
                       _serverStatus,
                       maxLines: 2,
@@ -1278,6 +1352,7 @@ class _DesktopHomeState extends State<DesktopHome> {
                   ],
                 ),
               ),
+
               Text(
                 ':$serverPort',
                 style: const TextStyle(
@@ -1287,6 +1362,7 @@ class _DesktopHomeState extends State<DesktopHome> {
               ),
             ],
           ),
+
           const SizedBox(height: 10),
 
           Row(
@@ -1299,6 +1375,7 @@ class _DesktopHomeState extends State<DesktopHome> {
                   style: const TextStyle(color: _muted, fontSize: 12),
                 ),
               ),
+
               IconButton(
                 tooltip: 'Скопировать адрес',
                 onPressed: _localIp == null
@@ -1316,11 +1393,7 @@ class _DesktopHomeState extends State<DesktopHome> {
           SizedBox(
             width: double.infinity,
             child: FilledButton.icon(
-              onPressed: busy
-                  ? null
-                  : running
-                  ? () => unawaited(_stopServer())
-                  : () => unawaited(_startServer()),
+              onPressed: action,
               icon: Icon(
                 running ? Icons.stop_rounded : Icons.play_arrow_rounded,
               ),
@@ -1339,70 +1412,20 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // CONNECTED DEVICES CARD
-  // ==========================================
-
-  Widget _buildDevicesCard() {
-    final devices = _clients.values.toList()
-      ..sort((a, b) => b.connectedAt.compareTo(a.connectedAt));
-
-    return _card(
-      Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.devices_outlined, color: _accent, size: 21),
-              const SizedBox(width: 10),
-              const Expanded(
-                child: Text(
-                  'Подключённые устройства',
-                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-                ),
-              ),
-              Text(
-                '${devices.length}',
-                style: const TextStyle(
-                  color: _accent,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 23,
-                ),
-              ),
-            ],
-          ),
-
-          if (devices.isEmpty)
-            const Padding(
-              padding: EdgeInsets.only(top: 10),
-              child: Text(
-                'Нет активных подключений',
-                style: TextStyle(color: _muted, fontSize: 12),
-              ),
-            )
-          else
-            for (final device in devices) _deviceRow(device),
-        ],
-      ),
-    );
-  }
-
-  // ==========================================
   // CONNECTED DEVICE ROW
   // ==========================================
 
   Widget _deviceRow(_ConnectedDevice device) {
-    // Build the subtitle separately to keep
-    // the widget tree simple and valid.
-    final subtitleParts = <String>[];
+    final subtitles = <String>[];
 
     final platform = device.platform;
 
     if (platform != null && platform.isNotEmpty) {
-      subtitleParts.add(platform);
+      subtitles.add(platform);
     }
 
-    subtitleParts.add(device.ipAddress);
-    subtitleParts.add('с ${device.connectedTime}');
+    subtitles.add(device.ip);
+    subtitles.add('с ${device.connectedTime}');
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 7),
@@ -1429,7 +1452,7 @@ class _DesktopHomeState extends State<DesktopHome> {
                 const SizedBox(height: 3),
 
                 Text(
-                  subtitleParts.join(' · '),
+                  subtitles.join(' · '),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(color: _muted, fontSize: 11),
@@ -1443,6 +1466,64 @@ class _DesktopHomeState extends State<DesktopHome> {
           const Icon(Icons.circle, color: _accent, size: 8),
         ],
       ),
+    );
+  }
+
+  // ==========================================
+  // CONNECTED DEVICES CARD
+  // ==========================================
+
+  Widget _devicesCard() {
+    final devices = _clients.values.toList();
+
+    devices.sort((a, b) => b.connectedAt.compareTo(a.connectedAt));
+
+    // Build the list explicitly to avoid
+    // nested if/else/for collection syntax.
+    final children = <Widget>[
+      Row(
+        children: [
+          const Icon(Icons.devices_outlined, color: _accent, size: 21),
+
+          const SizedBox(width: 10),
+
+          const Expanded(
+            child: Text(
+              'Подключённые устройства',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+            ),
+          ),
+
+          Text(
+            '${devices.length}',
+            style: const TextStyle(
+              color: _accent,
+              fontWeight: FontWeight.w800,
+              fontSize: 23,
+            ),
+          ),
+        ],
+      ),
+    ];
+
+    if (devices.isEmpty) {
+      children.add(
+        const Padding(
+          padding: EdgeInsets.only(top: 10),
+          child: Text(
+            'Нет активных подключений',
+            style: TextStyle(color: _muted, fontSize: 12),
+          ),
+        ),
+      );
+    } else {
+      for (final device in devices) {
+        children.add(_deviceRow(device));
+      }
+    }
+
+    return _card(
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: children),
     );
   }
 
@@ -1466,7 +1547,9 @@ class _DesktopHomeState extends State<DesktopHome> {
                     color: _accent,
                     size: 27,
                   ),
+
                   const SizedBox(width: 10),
+
                   Text(
                     'TruckLink Hub',
                     style: Theme.of(context).textTheme.headlineSmall?.copyWith(
@@ -1479,26 +1562,25 @@ class _DesktopHomeState extends State<DesktopHome> {
               const SizedBox(height: 5),
 
               const Text(
-                'Связь между ETS2 / ATS '
-                'и телефоном',
+                'Связь между ETS2 / ATS и телефоном',
                 style: TextStyle(color: _muted, fontSize: 12),
               ),
 
               const SizedBox(height: 17),
 
-              _buildGameCard(),
+              _gameCard(),
 
               const SizedBox(height: 10),
 
-              _buildPluginCard(),
+              _pluginCard(),
 
               const SizedBox(height: 10),
 
-              _buildServerCard(),
+              _serverCard(),
 
               const SizedBox(height: 10),
 
-              _buildDevicesCard(),
+              _devicesCard(),
 
               const SizedBox(height: 12),
 
@@ -1516,7 +1598,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // DISPOSE
+  // CLEANUP
   // ==========================================
 
   @override
@@ -1529,6 +1611,7 @@ class _DesktopHomeState extends State<DesktopHome> {
     }
 
     _clients.clear();
+    _syncingClients.clear();
 
     final server = _server;
     _server = null;
