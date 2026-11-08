@@ -10,6 +10,9 @@ import 'package:network_protocol/job_lifecycle_protocol.dart';
 import 'package:telemetry_core/telemetry_core.dart';
 import 'package:telemetry_core/job_telemetry.dart';
 
+import '../../features/jobs/history/job_history_entry.dart';
+import '../../features/jobs/history/job_history_store.dart';
+
 // ============================================
 // CONNECTION STATUS
 // ============================================
@@ -36,7 +39,7 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // CONNECTION SETTINGS
+  // CONFIGURATION
   // ==========================================
 
   static const int serverPort = 8787;
@@ -57,7 +60,6 @@ class TelemetryConnection extends ChangeNotifier {
 
   HttpClient? _httpClient;
   WebSocket? _socket;
-
   StreamSubscription<dynamic>? _subscription;
 
   Timer? _watchdog;
@@ -72,7 +74,6 @@ class TelemetryConnection extends ChangeNotifier {
 
   TruckSnapshot? _snapshot;
   TruckSnapshot? _pendingSnapshot;
-
   DateTime? _lastReceivedAt;
 
   // ==========================================
@@ -80,17 +81,19 @@ class TelemetryConnection extends ChangeNotifier {
   // ==========================================
 
   TruckLinkJobTelemetry? _activeJob;
-
   JobLifecycleEventKind? _lastJobEvent;
 
+  // Suppress late updates for a job that
+  // has already been confirmed as finished.
+  String? _endedJobIdentity;
+
   // ==========================================
-  // STATUS
+  // CONNECTION STATE
   // ==========================================
 
   TelemetryConnectionStatus _status = TelemetryConnectionStatus.disconnected;
 
   String _statusMessage = 'Нет подключения к ПК';
-
   String? _host;
 
   // ==========================================
@@ -131,9 +134,6 @@ class TelemetryConnection extends ChangeNotifier {
     if (_disposed) return;
 
     final cleanHost = host.trim();
-
-    // Ignore callbacks from all earlier
-    // connection attempts.
     final generation = ++_generation;
 
     _stopTransport();
@@ -142,7 +142,7 @@ class TelemetryConnection extends ChangeNotifier {
     _host = null;
 
     // ========================================
-    // VALIDATE ADDRESS
+    // VALIDATE IPv4
     // ========================================
 
     final address = InternetAddress.tryParse(cleanHost);
@@ -150,20 +150,18 @@ class TelemetryConnection extends ChangeNotifier {
     if (address == null || address.type != InternetAddressType.IPv4) {
       _setStatus(
         TelemetryConnectionStatus.error,
-        'Введите корректный IPv4-адрес '
-        'компьютера',
+        'Введите корректный IPv4-адрес компьютера',
       );
       return;
     }
 
     // ========================================
-    // CONNECTING
+    // START CONNECTION
     // ========================================
 
     _setStatus(
       TelemetryConnectionStatus.connecting,
-      'Подключение к '
-      '$cleanHost:$serverPort...',
+      'Подключение к $cleanHost:$serverPort...',
     );
 
     final client = HttpClient()..connectionTimeout = tcpTimeout;
@@ -175,14 +173,11 @@ class TelemetryConnection extends ChangeNotifier {
     final uri = Uri(scheme: 'ws', host: cleanHost, port: serverPort);
 
     try {
-      // Keep the original custom HttpClient.
-      // It controls TCP connection timeout.
+      // Keep TCP and handshake timeouts.
       final attempt = WebSocket.connect(uri.toString(), customClient: client);
 
-      // ======================================
-      // CLEAN UP LATE CONNECTIONS
-      // ======================================
-
+      // A superseded attempt may finish later.
+      // Close its socket instead of leaking it.
       attempt
           .then<void>(
             (lateSocket) {
@@ -193,50 +188,31 @@ class TelemetryConnection extends ChangeNotifier {
               }
             },
             onError: (Object error, StackTrace stackTrace) {
-              // The awaited attempt below
-              // handles this error.
+              // The awaited connection handles it.
             },
           )
           .ignore();
-
-      // ======================================
-      // OVERALL HANDSHAKE TIMEOUT
-      // ======================================
 
       final socket = await attempt.timeout(
         connectionTimeout,
         onTimeout: () {
           acceptSocket = false;
-
           client.close(force: true);
 
           throw TimeoutException('Windows Hub connection timed out');
         },
       );
 
-      // ======================================
-      // CHECK CURRENT ATTEMPT
-      // ======================================
-
       if (!_isCurrent(generation)) {
         acceptSocket = false;
-
         socket.close().ignore();
         return;
       }
-
-      // ======================================
-      // ENABLE PING / PONG
-      // ======================================
 
       socket.pingInterval = pingInterval;
 
       _socket = socket;
       _host = cleanHost;
-
-      // ======================================
-      // LISTEN FOR HUB MESSAGES
-      // ======================================
 
       _subscription = socket.listen(
         (dynamic message) {
@@ -245,17 +221,12 @@ class TelemetryConnection extends ChangeNotifier {
           }
         },
         onDone: () {
-          _handleConnectionLost(
-            generation,
-            'Соединение с Windows Hub '
-            'закрыто',
-          );
+          _handleConnectionLost(generation, 'Соединение с Windows Hub закрыто');
         },
         onError: (Object error) {
           _handleConnectionLost(
             generation,
-            'Соединение с Windows Hub '
-            'потеряно',
+            'Соединение с Windows Hub потеряно',
           );
         },
         cancelOnError: true,
@@ -263,24 +234,16 @@ class TelemetryConnection extends ChangeNotifier {
 
       _setStatus(
         TelemetryConnectionStatus.waiting,
-        'Подключено. Ожидание '
-        'телеметрии ETS2 / ATS...',
+        'Подключено. Ожидание телеметрии ETS2 / ATS...',
       );
 
-      // ======================================
-      // IDENTIFY MOBILE DEVICE
-      // ======================================
-
-      // Do not await this call.
-      // Device information must never delay
-      // the telemetry connection.
+      // Device identification must not
+      // block reception of telemetry.
       unawaited(_sendDeviceHello(socket, generation));
     } catch (error) {
       acceptSocket = false;
 
-      if (!_isCurrent(generation)) {
-        return;
-      }
+      if (!_isCurrent(generation)) return;
 
       _stopTransport();
       _clearTelemetry();
@@ -295,7 +258,7 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // SEND DEVICE HELLO
+  // DEVICE IDENTIFICATION
   // ==========================================
 
   Future<void> _sendDeviceHello(WebSocket socket, int generation) async {
@@ -310,10 +273,6 @@ class TelemetryConnection extends ChangeNotifier {
         : Platform.isIOS
         ? 'iPhone / iPad'
         : 'TruckLink Device';
-
-    // ========================================
-    // READ DEVICE INFORMATION
-    // ========================================
 
     try {
       final plugin = DeviceInfoPlugin();
@@ -337,7 +296,6 @@ class TelemetryConnection extends ChangeNotifier {
         platform = 'Android';
       } else if (Platform.isIOS) {
         final info = await plugin.iosInfo;
-
         final model = _cleanLabel(info.model, 48);
 
         if (model.isNotEmpty) {
@@ -347,22 +305,14 @@ class TelemetryConnection extends ChangeNotifier {
         platform = 'iOS';
       }
     } catch (error) {
-      debugPrint('TruckLink device information: $error');
+      debugPrint('TruckLink device info error: $error');
     }
-
-    // ========================================
-    // CHECK CONNECTION BEFORE SENDING
-    // ========================================
 
     if (!_isCurrent(generation) ||
         !identical(_socket, socket) ||
         socket.readyState != WebSocket.open) {
       return;
     }
-
-    // ========================================
-    // SEND IDENTIFICATION
-    // ========================================
 
     try {
       final name = _cleanLabel(deviceName, 64);
@@ -376,31 +326,19 @@ class TelemetryConnection extends ChangeNotifier {
         }),
       );
 
-      debugPrint(
-        'TruckLink: device identification '
-        'sent: $name',
-      );
+      debugPrint('TruckLink: identified device $name');
     } catch (error) {
-      debugPrint(
-        'TruckLink device hello error: '
-        '$error',
-      );
+      debugPrint('TruckLink device hello: $error');
     }
   }
 
-  // ==========================================
-  // DEVICE NAME HELPERS
-  // ==========================================
-
-  String _cleanLabel(String value, int maxLength) {
-    final cleaned = value
+  String _cleanLabel(String value, int limit) {
+    final result = value
         .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
 
-    return cleaned.length > maxLength
-        ? cleaned.substring(0, maxLength)
-        : cleaned;
+    return result.length <= limit ? result : result.substring(0, limit);
   }
 
   String _capitalize(String value) {
@@ -435,7 +373,65 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // RECEIVE HUB MESSAGES
+  // JOB IDENTITY
+  // ==========================================
+
+  String _jobIdentity(TruckLinkJobTelemetry job) {
+    return jsonEncode([
+      job.gameId,
+      job.cargoId,
+      job.cargoName,
+      job.sourceCity,
+      job.destinationCity,
+      job.sourceCompany,
+      job.destinationCompany,
+      job.income,
+      job.plannedDistanceKm,
+    ]);
+  }
+
+  // ==========================================
+  // SAVE CONFIRMED JOB RESULT
+  // ==========================================
+
+  Future<void> _saveHistory(JobLifecycleMessage details) async {
+    final event = details.event;
+
+    if (event != JobLifecycleEventKind.delivered &&
+        event != JobLifecycleEventKind.cancelled) {
+      return;
+    }
+
+    final eventId = details.eventId;
+    final time = details.occurredAtUtc;
+    final job = details.finalJob;
+
+    // Never fabricate missing archival data.
+    if (eventId == null || time == null || job == null) {
+      debugPrint('TruckLink: job event has no archival data');
+      return;
+    }
+
+    try {
+      await JobHistoryStore.instance.addEntry(
+        JobHistoryEntry(
+          id: eventId,
+          result: event,
+          completedAtUtc: time,
+          job: job,
+        ),
+      );
+
+      debugPrint('TruckLink: history saved ($eventId)');
+    } catch (error) {
+      // Storage errors must never disconnect
+      // an otherwise healthy WebSocket.
+      debugPrint('TruckLink: history save failed: $error');
+    }
+  }
+
+  // ==========================================
+  // RECEIVE WEBSOCKET MESSAGES
   // ==========================================
 
   void _handleMessage(int generation, dynamic message) {
@@ -445,62 +441,84 @@ class TelemetryConnection extends ChangeNotifier {
       }
 
       // ======================================
-      // 1. JOB LIFECYCLE EVENT
+      // 1. JOB LIFECYCLE / HISTORY
       // ======================================
 
       if (isJobEventMessage(message)) {
-        final event = decodeJobEvent(message);
+        final details = decodeJobEventDetails(message);
+
+        final event = details.event;
 
         if (event == JobLifecycleEventKind.started) {
-          // A new job replaces the result
-          // of any earlier delivery.
           final hadResult = _lastJobEvent != null;
 
           _lastJobEvent = null;
+          _endedJobIdentity = null;
 
           if (hadResult) {
             _notify();
           }
 
           debugPrint('TruckLink: job accepted');
-        } else {
-          // Confirmed delivery or cancellation.
-          _lastJobEvent = event;
 
-          // Clear any old job immediately,
-          // even if job_update(null) was delayed.
-          _activeJob = null;
-
-          debugPrint('TruckLink: job ${event.name}');
-
-          _notify();
+          return;
         }
 
+        // Confirmed delivery or cancellation.
+        // Remember its identity so a delayed
+        // job_update cannot resurrect the cargo.
+        final finishedJob = details.finalJob ?? _activeJob;
+
+        if (finishedJob != null) {
+          _endedJobIdentity = _jobIdentity(finishedJob);
+        }
+
+        _activeJob = null;
+        _lastJobEvent = event;
+
+        _notify();
+
+        debugPrint('TruckLink: job ${event.name}');
+
+        // Save independently of the current
+        // screen and without awaiting storage.
+        unawaited(_saveHistory(details));
         return;
       }
 
       // ======================================
-      // 2. ACTIVE JOB UPDATE
+      // 2. CURRENT JOB
       // ======================================
 
       if (isJobUpdateMessage(message)) {
         final nextJob = decodeJobUpdate(message);
 
+        // Suppress an outdated update for
+        // the delivery that just ended.
+        if (nextJob != null &&
+            _endedJobIdentity != null &&
+            _jobIdentity(nextJob) == _endedJobIdentity) {
+          return;
+        }
+
+        // An explicit null update signals
+        // that the old job has disappeared.
+        if (nextJob == null) {
+          _endedJobIdentity = null;
+        }
+
         final previousJob = _activeJob;
 
-        // Compare the actual fields, not
-        // the model object identities.
         final changed = !mapEquals(previousJob?.toJson(), nextJob?.toJson());
 
         _activeJob = nextJob;
 
-        var eventChanged = false;
+        var resultChanged = false;
 
-        // New active job clears an old
-        // delivered/cancelled notification.
-        if (previousJob == null && nextJob != null && _lastJobEvent != null) {
+        if (nextJob != null && _lastJobEvent != null) {
           _lastJobEvent = null;
-          eventChanged = true;
+          _endedJobIdentity = null;
+          resultChanged = true;
         }
 
         if (previousJob == null && nextJob != null) {
@@ -513,9 +531,7 @@ class TelemetryConnection extends ChangeNotifier {
           debugPrint('TruckLink: active job cleared');
         }
 
-        // Avoid unnecessary rebuilds when
-        // the repeated job update is identical.
-        if (changed || eventChanged) {
+        if (changed || resultChanged) {
           _notify();
         }
 
@@ -523,16 +539,16 @@ class TelemetryConnection extends ChangeNotifier {
       }
 
       // ======================================
-      // 3. EXISTING TRUCK SNAPSHOT
+      // 3. TRUCK SNAPSHOT
       // ======================================
 
       final nextSnapshot = decodeSnapshot(message);
 
-      // Keep only the latest frame.
       _pendingSnapshot = nextSnapshot;
       _lastReceivedAt = DateTime.now();
 
-      // At most 10 truck UI updates/second.
+      // At most 10 published truck snapshots
+      // per second, even if Hub sends faster.
       _updateTimer ??= Timer(uiUpdateInterval, _publishPendingSnapshot);
     } catch (error) {
       _handleConnectionLost(generation, 'Ошибка формата телеметрии: $error');
@@ -540,7 +556,7 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // PUBLISH TRUCK SNAPSHOT
+  // PUBLISH LATEST TRUCK SNAPSHOT
   // ==========================================
 
   void _publishPendingSnapshot() {
@@ -556,14 +572,13 @@ class TelemetryConnection extends ChangeNotifier {
     _snapshot = pending;
 
     _status = TelemetryConnectionStatus.connected;
-
     _statusMessage = 'Телеметрия ETS2 / ATS активна';
 
     _notify();
   }
 
   // ==========================================
-  // CHECK TELEMETRY FRESHNESS
+  // TELEMETRY FRESHNESS
   // ==========================================
 
   void _checkFreshness() {
@@ -578,7 +593,10 @@ class TelemetryConnection extends ChangeNotifier {
     if (lastReceived == null) return;
 
     if (DateTime.now().difference(lastReceived) > telemetryTimeout) {
-      _clearTelemetry();
+      // Keep the last confirmed job result
+      // while the Hub connection is alive.
+      // ETS2 may pause on delivery.
+      _clearTelemetry(preserveLastJobEvent: true);
 
       _setStatus(
         TelemetryConnectionStatus.stale,
@@ -592,11 +610,8 @@ class TelemetryConnection extends ChangeNotifier {
   // ==========================================
 
   void _handleConnectionLost(int generation, String message) {
-    if (!_isCurrent(generation)) {
-      return;
-    }
+    if (!_isCurrent(generation)) return;
 
-    // Invalidate pending callbacks.
     ++_generation;
 
     _stopTransport();
@@ -628,7 +643,7 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // FAST TRANSPORT CLEANUP
+  // TRANSPORT CLEANUP
   // ==========================================
 
   void _stopTransport() {
@@ -640,8 +655,6 @@ class TelemetryConnection extends ChangeNotifier {
     _socket = null;
     _httpClient = null;
 
-    // Do not await cleanup here.
-    // Navigation and reconnect must stay fast.
     subscription?.cancel().ignore();
     socket?.close().ignore();
 
@@ -649,20 +662,21 @@ class TelemetryConnection extends ChangeNotifier {
   }
 
   // ==========================================
-  // CLEAR TELEMETRY AND JOB
+  // CLEAR TELEMETRY
   // ==========================================
 
-  void _clearTelemetry() {
+  void _clearTelemetry({bool preserveLastJobEvent = false}) {
     _updateTimer?.cancel();
     _updateTimer = null;
 
     _snapshot = null;
     _pendingSnapshot = null;
-
-    // Do not show old deliveries
-    // after disconnecting.
     _activeJob = null;
-    _lastJobEvent = null;
+
+    if (!preserveLastJobEvent) {
+      _lastJobEvent = null;
+      _endedJobIdentity = null;
+    }
 
     _lastReceivedAt = null;
   }
@@ -680,7 +694,6 @@ class TelemetryConnection extends ChangeNotifier {
 
     _status = status;
     _statusMessage = message;
-
     _notify();
   }
 

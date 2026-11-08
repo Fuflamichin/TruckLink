@@ -43,10 +43,7 @@ class _TruckLinkSplashState extends State<TruckLinkSplash> {
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 280),
       child: _complete
-          ? KeyedSubtree(
-              key: const ValueKey('app'),
-              child: widget.child,
-            )
+          ? KeyedSubtree(key: const ValueKey('app'), child: widget.child)
           : Scaffold(
               key: const ValueKey('splash'),
               backgroundColor: const Color(0xFF091018),

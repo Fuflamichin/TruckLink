@@ -3,19 +3,16 @@ import 'package:network_protocol/job_lifecycle_protocol.dart';
 import 'package:telemetry_core/job_telemetry.dart';
 
 import '../../core/network/telemetry_connection.dart';
+import 'history/job_history_screen.dart';
 
 // ============================================
-// TRUCKLINK JOB SCREEN v0.7.4
+// JOB SCREEN v0.8.1
 // ============================================
 
 class JobScreen extends StatelessWidget {
   const JobScreen({super.key, required this.connection});
 
   final TelemetryConnection connection;
-
-  // ==========================================
-  // BUILD / LISTEN FOR CHANGES
-  // ==========================================
 
   @override
   Widget build(BuildContext context) {
@@ -28,39 +25,63 @@ class JobScreen extends StatelessWidget {
   }
 
   // ==========================================
-  // SCREEN CONTENT
+  // OPEN HISTORY
+  // ==========================================
+
+  void _openHistory(BuildContext context) {
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => const JobHistoryScreen()));
+  }
+
+  // ==========================================
+  // CONTENT
   // ==========================================
 
   Widget _buildContent(BuildContext context) {
     final theme = Theme.of(context);
 
-    final job = connection.isConnected && connection.hasLiveData
+    final TruckLinkJobTelemetry? job =
+        connection.isConnected && connection.hasLiveData
         ? connection.activeJob
         : null;
 
-    // Reserve space for the floating
-    // TruckLink bottom navigation.
-    final bottomPadding = MediaQuery.paddingOf(context).bottom + 110.0;
+    // Leave space for TruckLink's floating
+    // bottom navigation.
+    final bottomPadding = MediaQuery.paddingOf(context).bottom + 110;
 
     return ListView(
       key: const PageStorageKey<String>('trucklink-job-screen'),
       padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPadding),
       children: [
         // ====================================
-        // HEADER
+        // HEADER + HISTORY BUTTON
         // ====================================
         Row(
           children: [
             Expanded(
               child: Text(
                 'Текущая перевозка',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.titleLarge?.copyWith(
                   fontWeight: FontWeight.w800,
                 ),
               ),
             ),
-            if (job != null)
-              _JobBadge(label: 'Выполняется', icon: Icons.circle),
+
+            if (job != null) ...[
+              const SizedBox(width: 6),
+              const _JobBadge(label: 'Выполняется', icon: Icons.circle),
+            ],
+
+            const SizedBox(width: 6),
+
+            IconButton(
+              tooltip: 'История перевозок',
+              onPressed: () => _openHistory(context),
+              icon: const Icon(Icons.history_rounded),
+            ),
           ],
         ),
 
@@ -80,26 +101,15 @@ class JobScreen extends StatelessWidget {
             details: connection.statusMessage,
           )
         // ====================================
-        // NO LIVE GAME TELEMETRY
-        // ====================================
-        else if (!connection.hasLiveData)
-          _JobEmptyState(
-            icon: Icons.sports_esports_outlined,
-            title: 'Ожидание данных игры',
-            description:
-                'Соединение с Windows Hub есть, '
-                'но ETS2 / ATS пока не передаёт '
-                'актуальную телеметрию.',
-            details: connection.statusMessage,
-          )
-        // ====================================
         // ACTIVE DELIVERY
         // ====================================
         else if (job != null) ...[
           _CargoCard(job: job),
+
           const SizedBox(height: 12),
 
           _RouteCard(job: job),
+
           const SizedBox(height: 18),
 
           Text(
@@ -108,18 +118,22 @@ class JobScreen extends StatelessWidget {
               fontWeight: FontWeight.w700,
             ),
           ),
+
           const SizedBox(height: 12),
 
           _JobMetrics(job: job),
+
           const SizedBox(height: 12),
 
           _AdditionalJobDetails(job: job),
+
           const SizedBox(height: 14),
 
           Text(
             'Расстояние и ETA берутся из '
             'игрового навигатора. '
-            'До сдачи — игровое время.',
+            'Срок доставки указан '
+            'в игровом времени.',
             textAlign: TextAlign.center,
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
@@ -136,12 +150,12 @@ class JobScreen extends StatelessWidget {
             title: 'Доставка завершена',
             description:
                 'Груз успешно доставлен. '
-                'Перевозка завершена, '
-                'можешь принять новый заказ '
-                'в ETS2 или ATS.',
+                'Можешь принять следующий заказ '
+                'в Euro Truck Simulator 2 '
+                'или American Truck Simulator.',
             details:
-                'Доставка подтверждена '
-                'игровым плагином.',
+                'Результат получен от игрового '
+                'плагина. Открой историю рейсов.',
             isSuccess: true,
           )
         // ====================================
@@ -152,17 +166,29 @@ class JobScreen extends StatelessWidget {
             icon: Icons.cancel_outlined,
             title: 'Заказ отменён',
             description:
-                'Текущая перевозка была '
-                'отменена в игре. '
+                'Текущая перевозка была отменена. '
                 'Выбери новый заказ, чтобы '
                 'продолжить работу.',
             details:
-                'Отмена подтверждена '
-                'игровым плагином.',
+                'Отмена подтверждена игровым '
+                'плагином. Открой историю рейсов.',
             isWarning: true,
           )
         // ====================================
-        // NO ACTIVE DELIVERY
+        // WAITING FOR GAME TELEMETRY
+        // ====================================
+        else if (!connection.hasLiveData)
+          _JobEmptyState(
+            icon: Icons.sports_esports_outlined,
+            title: 'Ожидание данных игры',
+            description:
+                'Соединение с Windows Hub есть, '
+                'но ETS2 / ATS пока не передаёт '
+                'актуальную телеметрию.',
+            details: connection.statusMessage,
+          )
+        // ====================================
+        // NO ACTIVE JOB
         // ====================================
         else
           const _JobEmptyState(
@@ -171,8 +197,8 @@ class JobScreen extends StatelessWidget {
             description:
                 'Прими перевозку в Euro Truck '
                 'Simulator 2 или American Truck '
-                'Simulator. Данные появятся '
-                'автоматически.',
+                'Simulator. Данные о грузе '
+                'и маршруте появятся автоматически.',
             details: 'Телеметрия грузовика подключена.',
           ),
       ],
@@ -181,7 +207,7 @@ class JobScreen extends StatelessWidget {
 }
 
 // ============================================
-// STATUS BADGE
+// ACTIVE JOB BADGE
 // ============================================
 
 class _JobBadge extends StatelessWidget {
@@ -192,24 +218,24 @@ class _JobBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = Theme.of(context).colorScheme.primary;
+    final accent = Theme.of(context).colorScheme.primary;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: color.withValues(alpha: 0.4)),
+        color: accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: accent.withValues(alpha: 0.38)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: color, size: 9),
+          Icon(icon, color: accent, size: 9),
           const SizedBox(width: 7),
           Text(
             label,
             style: TextStyle(
-              color: color,
+              color: accent,
               fontWeight: FontWeight.w700,
               fontSize: 11,
             ),
@@ -247,7 +273,7 @@ class _JobEmptyState extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
 
-    final Color accent = isWarning ? scheme.error : scheme.primary;
+    final accent = isWarning ? scheme.error : scheme.primary;
 
     final muted = scheme.onSurfaceVariant;
 
@@ -263,7 +289,7 @@ class _JobEmptyState extends StatelessWidget {
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: accent.withValues(alpha: 0.1),
+                color: accent.withValues(alpha: 0.10),
               ),
               child: Icon(icon, size: 35, color: accent),
             ),
@@ -291,13 +317,15 @@ class _JobEmptyState extends StatelessWidget {
             ),
 
             const SizedBox(height: 20),
+
             const Divider(),
+
             const SizedBox(height: 10),
 
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(Icons.info_outline_rounded, color: muted, size: 17),
+                Icon(Icons.info_outline_rounded, size: 17, color: muted),
                 const SizedBox(width: 8),
                 Flexible(
                   child: Text(
@@ -349,8 +377,8 @@ class _CargoCard extends StatelessWidget {
                   height: 46,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(14),
                     color: scheme.primary.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(14),
                   ),
                   child: Icon(
                     Icons.inventory_2_outlined,
@@ -358,7 +386,9 @@ class _CargoCard extends StatelessWidget {
                     size: 24,
                   ),
                 ),
+
                 const SizedBox(width: 13),
+
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -371,7 +401,9 @@ class _CargoCard extends StatelessWidget {
                           letterSpacing: 1.1,
                         ),
                       ),
+
                       const SizedBox(height: 4),
+
                       Text(
                         job.displayCargo,
                         style: theme.textTheme.titleMedium?.copyWith(
@@ -385,7 +417,9 @@ class _CargoCard extends StatelessWidget {
             ),
 
             const SizedBox(height: 14),
+
             const Divider(),
+
             const SizedBox(height: 10),
 
             Wrap(
@@ -396,8 +430,10 @@ class _CargoCard extends StatelessWidget {
                   icon: Icons.sports_esports_outlined,
                   value: job.gameName,
                 ),
+
                 if (massText != null)
                   _InlineDetail(icon: Icons.scale_outlined, value: massText),
+
                 if (job.specialJob)
                   const _InlineDetail(
                     icon: Icons.star_outline_rounded,
@@ -429,7 +465,7 @@ class _InlineDetail extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 16, color: theme.colorScheme.primary),
+        Icon(icon, color: theme.colorScheme.primary, size: 16),
         const SizedBox(width: 6),
         Text(
           value,
@@ -451,6 +487,11 @@ class _RouteCard extends StatelessWidget {
 
   final TruckLinkJobTelemetry job;
 
+  static String _display(String text) {
+    final trimmed = text.trim();
+    return trimmed.isEmpty ? 'Не указано' : trimmed;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -465,7 +506,7 @@ class _RouteCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Icon(Icons.route_rounded, size: 21, color: accent),
+                Icon(Icons.route_rounded, color: accent, size: 21),
                 const SizedBox(width: 9),
                 Text(
                   'Маршрут',
@@ -510,10 +551,6 @@ class _RouteCard extends StatelessWidget {
       ),
     );
   }
-
-  String _display(String value) {
-    return value.trim().isEmpty ? 'Не указано' : value;
-  }
 }
 
 // ============================================
@@ -543,7 +580,9 @@ class _RoutePoint extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         SizedBox(width: 22, child: Icon(icon, color: color, size: 21)),
+
         const SizedBox(width: 13),
+
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -556,14 +595,18 @@ class _RoutePoint extends StatelessWidget {
                   letterSpacing: 1.1,
                 ),
               ),
+
               const SizedBox(height: 4),
+
               Text(
                 city,
                 style: theme.textTheme.titleMedium?.copyWith(
                   fontWeight: FontWeight.w800,
                 ),
               ),
+
               const SizedBox(height: 3),
+
               Text(
                 company,
                 style: theme.textTheme.bodySmall?.copyWith(
@@ -579,7 +622,7 @@ class _RoutePoint extends StatelessWidget {
 }
 
 // ============================================
-// JOB METRICS
+// METRICS GRID
 // ============================================
 
 class _JobMetrics extends StatelessWidget {
@@ -590,7 +633,6 @@ class _JobMetrics extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final distance = job.navigationDistanceKm;
-
     final mass = job.cargoMassKg;
 
     final stats = <_JobStat>[
@@ -600,6 +642,7 @@ class _JobMetrics extends StatelessWidget {
         note: 'В валюте игры',
         icon: Icons.payments_outlined,
       ),
+
       _JobStat(
         title: 'Весь маршрут',
         value: job.plannedDistanceKm > 0
@@ -608,6 +651,7 @@ class _JobMetrics extends StatelessWidget {
         note: 'Плановое расстояние',
         icon: Icons.route_outlined,
       ),
+
       _JobStat(
         title: 'Осталось',
         value: distance != null && distance.isFinite && distance > 0
@@ -616,18 +660,21 @@ class _JobMetrics extends StatelessWidget {
         note: 'По игровому GPS',
         icon: Icons.navigation_outlined,
       ),
+
       _JobStat(
         title: 'Время в пути',
         value: _JobFormat.durationFromSeconds(job.navigationTimeSeconds),
         note: 'Оценка навигатора',
         icon: Icons.timer_outlined,
       ),
+
       _JobStat(
         title: 'До сдачи',
         value: _JobFormat.gameMinutes(job.remainingDeliveryMinutes),
         note: 'Игровое время',
         icon: Icons.event_available_outlined,
       ),
+
       _JobStat(
         title: 'Масса груза',
         value: mass != null && mass.isFinite && mass > 0
@@ -662,7 +709,7 @@ class _JobMetrics extends StatelessWidget {
 }
 
 // ============================================
-// JOB STAT MODEL
+// STAT DATA
 // ============================================
 
 class _JobStat {
@@ -680,7 +727,7 @@ class _JobStat {
 }
 
 // ============================================
-// JOB STAT CARD
+// STAT CARD
 // ============================================
 
 class _JobStatCard extends StatelessWidget {
@@ -703,7 +750,9 @@ class _JobStatCard extends StatelessWidget {
             Row(
               children: [
                 Icon(stat.icon, size: 18, color: accent),
+
                 const SizedBox(width: 7),
+
                 Expanded(
                   child: Text(
                     stat.title,
@@ -717,7 +766,9 @@ class _JobStatCard extends StatelessWidget {
                 ),
               ],
             ),
+
             const Spacer(),
+
             SizedBox(
               width: double.infinity,
               child: FittedBox(
@@ -727,13 +778,15 @@ class _JobStatCard extends StatelessWidget {
                   stat.value,
                   maxLines: 1,
                   style: theme.textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.w800,
                     color: accent,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
               ),
             ),
+
             const SizedBox(height: 4),
+
             Text(
               stat.note,
               maxLines: 1,
@@ -815,7 +868,7 @@ class _AdditionalJobDetails extends StatelessWidget {
 }
 
 // ============================================
-// DETAIL ROW
+// DETAILS ROW
 // ============================================
 
 class _DetailRow extends StatelessWidget {
@@ -840,7 +893,9 @@ class _DetailRow extends StatelessWidget {
             ),
           ),
         ),
+
         const SizedBox(width: 10),
+
         Expanded(
           flex: 5,
           child: Text(
@@ -857,36 +912,27 @@ class _DetailRow extends StatelessWidget {
 }
 
 // ============================================
-// FORMATTING HELPERS
+// FORMATTERS
 // ============================================
 
 abstract final class _JobFormat {
-  // ==========================================
-  // GROUP THOUSANDS
-  // ==========================================
-
   static String groupNumber(int number) {
     final negative = number < 0;
     final digits = number.abs().toString();
-
     final buffer = StringBuffer();
 
-    for (var index = 0; index < digits.length; index++) {
-      if (index > 0 && (digits.length - index) % 3 == 0) {
+    for (var i = 0; i < digits.length; i++) {
+      if (i > 0 && (digits.length - i) % 3 == 0) {
         buffer.write(' ');
       }
 
-      buffer.write(digits[index]);
+      buffer.write(digits[i]);
     }
 
     final result = buffer.toString();
 
     return negative ? '-$result' : result;
   }
-
-  // ==========================================
-  // NAVIGATION TIME
-  // ==========================================
 
   static String durationFromSeconds(double? seconds) {
     if (seconds == null || !seconds.isFinite || seconds <= 0) {
@@ -904,18 +950,14 @@ abstract final class _JobFormat {
     }
 
     final hours = minutes ~/ 60;
-    final rest = minutes % 60;
+    final remaining = minutes % 60;
 
-    if (rest == 0) {
+    if (remaining == 0) {
       return '$hours ч';
     }
 
-    return '$hours ч $rest мин';
+    return '$hours ч $remaining мин';
   }
-
-  // ==========================================
-  // IN-GAME DELIVERY TIME
-  // ==========================================
 
   static String gameMinutes(int? minutes) {
     if (minutes == null || minutes < 0) {
