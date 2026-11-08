@@ -1,21 +1,18 @@
 import 'package:flutter/material.dart';
 
+import '../../analytics/analytics_screen.dart';
+import '../../finance/finance_screen.dart';
 import 'job_history_entry.dart';
 import 'job_history_store.dart';
 
 // ============================================
-// TRUCKLINK JOB HISTORY SCREEN
-// Version 0.8.1
-// ============================================
-
-// ============================================
-// HISTORY FILTERS
+// TRUCKLINK JOB HISTORY v0.8.3
 // ============================================
 
 enum _HistoryFilter { all, delivered, cancelled }
 
 // ============================================
-// JOB HISTORY SCREEN
+// HISTORY SCREEN
 // ============================================
 
 class JobHistoryScreen extends StatefulWidget {
@@ -31,45 +28,82 @@ class _JobHistoryScreenState extends State<JobHistoryScreen> {
   _HistoryFilter _filter = _HistoryFilter.all;
 
   // ==========================================
-  // FILTER HISTORY
+  // FILTER ENTRIES
   // ==========================================
 
-  List<JobHistoryEntry> _filteredEntries(List<JobHistoryEntry> entries) {
+  List<JobHistoryEntry> _filtered(List<JobHistoryEntry> entries) {
     return switch (_filter) {
       _HistoryFilter.all => entries,
 
       _HistoryFilter.delivered =>
-        entries.where((entry) => entry.isDelivered).toList(),
+        entries.where((entry) => entry.isDelivered).toList(growable: false),
 
       _HistoryFilter.cancelled =>
-        entries.where((entry) => entry.isCancelled).toList(),
+        entries.where((entry) => entry.isCancelled).toList(growable: false),
     };
+  }
+
+  // ==========================================
+  // OPEN ANALYTICS
+  // ==========================================
+
+  void _openAnalytics() {
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => const AnalyticsScreen()));
+  }
+
+  // ==========================================
+  // OPEN FINANCES
+  // ==========================================
+
+  void _openFinances() {
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => const FinanceScreen()));
   }
 
   // ==========================================
   // FILTER CHIP
   // ==========================================
 
-  Widget _filterChip(String title, _HistoryFilter value) {
+  Widget _filterChip(String title, _HistoryFilter filter) {
     return ChoiceChip(
       label: Text(title),
-      selected: _filter == value,
+      selected: _filter == filter,
       onSelected: (_) {
         setState(() {
-          _filter = value;
+          _filter = filter;
         });
       },
     );
   }
 
   // ==========================================
-  // BUILD SCREEN
+  // BUILD
   // ==========================================
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('История перевозок')),
+      appBar: AppBar(
+        title: const Text('История перевозок'),
+        actions: [
+          IconButton(
+            tooltip: 'Аналитика',
+            icon: const Icon(Icons.bar_chart_rounded),
+            onPressed: _openAnalytics,
+          ),
+
+          IconButton(
+            tooltip: 'Финансы',
+            icon: const Icon(Icons.account_balance_wallet_outlined),
+            onPressed: _openFinances,
+          ),
+
+          const SizedBox(width: 5),
+        ],
+      ),
       body: ListenableBuilder(
         listenable: _store,
         builder: (context, child) {
@@ -78,21 +112,21 @@ class _JobHistoryScreenState extends State<JobHistoryScreen> {
           }
 
           final allEntries = _store.entries;
-
-          final visibleEntries = _filteredEntries(allEntries);
+          final visibleEntries = _filtered(allEntries);
 
           return ListView(
+            key: const PageStorageKey<String>('trucklink-job-history'),
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
             children: [
               // ==================================
-              // SUMMARY CARDS
+              // SUMMARY
               // ==================================
               Row(
                 children: [
                   Expanded(
-                    child: _SummaryCard(
-                      label: 'Доставлено',
-                      value: _store.deliveredCount,
+                    child: _HistorySummaryCard(
+                      title: 'Доставлено',
+                      count: _store.deliveredCount,
                       icon: Icons.task_alt_rounded,
                       color: Theme.of(context).colorScheme.primary,
                     ),
@@ -101,9 +135,9 @@ class _JobHistoryScreenState extends State<JobHistoryScreen> {
                   const SizedBox(width: 10),
 
                   Expanded(
-                    child: _SummaryCard(
-                      label: 'Отменено',
-                      value: _store.cancelledCount,
+                    child: _HistorySummaryCard(
+                      title: 'Отменено',
+                      count: _store.cancelledCount,
                       icon: Icons.cancel_outlined,
                       color: Theme.of(context).colorScheme.error,
                     ),
@@ -112,14 +146,14 @@ class _JobHistoryScreenState extends State<JobHistoryScreen> {
               ),
 
               // ==================================
-              // STORAGE ERROR
+              // STORAGE WARNING
               // ==================================
               if (_store.error != null) ...[
                 const SizedBox(height: 12),
 
                 Card(
                   child: Padding(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(13),
                     child: Row(
                       children: [
                         Icon(
@@ -156,28 +190,25 @@ class _JobHistoryScreenState extends State<JobHistoryScreen> {
               const SizedBox(height: 16),
 
               // ==================================
-              // HISTORY LIST
+              // ENTRIES
               // ==================================
               if (visibleEntries.isEmpty)
-                _EmptyHistory(hasEntries: allEntries.isNotEmpty)
+                _EmptyHistory(filtered: allEntries.isNotEmpty)
               else
                 for (final entry in visibleEntries)
                   Padding(
                     key: ValueKey(entry.id),
                     padding: const EdgeInsets.only(bottom: 10),
-                    child: _HistoryCard(entry: entry),
+                    child: _SavedJobCard(entry: entry),
                   ),
 
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
 
-              // ==================================
-              // FOOTER
-              // ==================================
               Text(
-                'История сохраняется на этом '
-                'телефоне. Перевозки, завершённые '
-                'без подключения к Windows Hub, '
-                'пока не записываются.',
+                'История хранится локально '
+                'на этом телефоне. '
+                'Нажми значок графика вверху, '
+                'чтобы открыть аналитику.',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -192,24 +223,26 @@ class _JobHistoryScreenState extends State<JobHistoryScreen> {
 }
 
 // ============================================
-// SUMMARY CARD
+// HISTORY SUMMARY CARD
 // ============================================
 
-class _SummaryCard extends StatelessWidget {
-  const _SummaryCard({
-    required this.label,
-    required this.value,
+class _HistorySummaryCard extends StatelessWidget {
+  const _HistorySummaryCard({
+    required this.title,
+    required this.count,
     required this.icon,
     required this.color,
   });
 
-  final String label;
-  final int value;
+  final String title;
+  final int count;
   final IconData icon;
   final Color color;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
@@ -222,16 +255,16 @@ class _SummaryCard extends StatelessWidget {
             const SizedBox(height: 12),
 
             Text(
-              '$value',
-              style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                fontWeight: FontWeight.w800,
+              '$count',
+              style: theme.textTheme.headlineMedium?.copyWith(
                 color: color,
+                fontWeight: FontWeight.w800,
               ),
             ),
 
             const SizedBox(height: 3),
 
-            Text(label, style: Theme.of(context).textTheme.bodySmall),
+            Text(title, style: theme.textTheme.bodySmall),
           ],
         ),
       ),
@@ -243,8 +276,8 @@ class _SummaryCard extends StatelessWidget {
 // SAVED JOB CARD
 // ============================================
 
-class _HistoryCard extends StatelessWidget {
-  const _HistoryCard({required this.entry});
+class _SavedJobCard extends StatelessWidget {
+  const _SavedJobCard({required this.entry});
 
   final JobHistoryEntry entry;
 
@@ -252,11 +285,11 @@ class _HistoryCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    final statusColor = entry.isDelivered
+    final job = entry.job;
+
+    final accent = entry.isDelivered
         ? theme.colorScheme.primary
         : theme.colorScheme.error;
-
-    final job = entry.job;
 
     return Card(
       margin: EdgeInsets.zero,
@@ -274,8 +307,8 @@ class _HistoryCard extends StatelessWidget {
                   entry.isDelivered
                       ? Icons.inventory_2_outlined
                       : Icons.cancel_outlined,
+                  color: accent,
                   size: 23,
-                  color: statusColor,
                 ),
 
                 const SizedBox(width: 10),
@@ -308,7 +341,7 @@ class _HistoryCard extends StatelessWidget {
             const SizedBox(height: 6),
 
             // ==================================
-            // GAME AND DATE
+            // GAME / DATE
             // ==================================
             Text(
               '${job.gameName} · '
@@ -319,13 +352,11 @@ class _HistoryCard extends StatelessWidget {
             ),
 
             const SizedBox(height: 12),
-
             const Divider(),
-
             const SizedBox(height: 8),
 
             // ==================================
-            // RESULT AND REWARD
+            // STATUS / PROMISED REWARD
             // ==================================
             Row(
               children: [
@@ -333,7 +364,7 @@ class _HistoryCard extends StatelessWidget {
                   entry.isDelivered
                       ? Icons.check_circle_outline
                       : Icons.highlight_off_rounded,
-                  color: statusColor,
+                  color: accent,
                   size: 17,
                 ),
 
@@ -342,7 +373,7 @@ class _HistoryCard extends StatelessWidget {
                 Text(
                   entry.statusText,
                   style: TextStyle(
-                    color: statusColor,
+                    color: accent,
                     fontWeight: FontWeight.w700,
                     fontSize: 12,
                   ),
@@ -352,8 +383,8 @@ class _HistoryCard extends StatelessWidget {
 
                 Flexible(
                   child: Text(
-                    'Награда: '
-                    '${_formatNumber(job.income)}',
+                    'По контракту: '
+                    '${_group(job.income)}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     textAlign: TextAlign.end,
@@ -369,35 +400,6 @@ class _HistoryCard extends StatelessWidget {
       ),
     );
   }
-
-  // ==========================================
-  // FORMAT DATE
-  // ==========================================
-
-  static String _formatDate(DateTime utc) {
-    final date = utc.toLocal();
-
-    String two(int value) {
-      return value.toString().padLeft(2, '0');
-    }
-
-    return '${two(date.day)}.'
-        '${two(date.month)}.'
-        '${date.year} '
-        '${two(date.hour)}:'
-        '${two(date.minute)}';
-  }
-
-  // ==========================================
-  // FORMAT NUMBER
-  // ==========================================
-
-  static String _formatNumber(int value) {
-    return value.toString().replaceAllMapped(
-      RegExp(r'\B(?=(\d{3})+(?!\d))'),
-      (_) => ' ',
-    );
-  }
 }
 
 // ============================================
@@ -405,9 +407,9 @@ class _HistoryCard extends StatelessWidget {
 // ============================================
 
 class _EmptyHistory extends StatelessWidget {
-  const _EmptyHistory({required this.hasEntries});
+  const _EmptyHistory({required this.filtered});
 
-  final bool hasEntries;
+  final bool filtered;
 
   @override
   Widget build(BuildContext context) {
@@ -428,22 +430,21 @@ class _EmptyHistory extends StatelessWidget {
             const SizedBox(height: 14),
 
             Text(
-              hasEntries
-                  ? 'Нет записей для этого фильтра'
-                  : 'История пока пуста',
+              filtered ? 'Нет записей для этого фильтра' : 'История пока пуста',
               textAlign: TextAlign.center,
               style: theme.textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w700,
               ),
             ),
 
-            if (!hasEntries) ...[
+            if (!filtered) ...[
               const SizedBox(height: 9),
 
               Text(
                 'Заверши или отмени заказ '
-                'при подключённом Windows Hub. '
-                'Рейс появится здесь автоматически.',
+                'при подключённом TruckLink Hub. '
+                'Сведения о рейсе появятся здесь '
+                'автоматически.',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
@@ -455,4 +456,28 @@ class _EmptyHistory extends StatelessWidget {
       ),
     );
   }
+}
+
+// ============================================
+// FORMATTING
+// ============================================
+
+String _formatDate(DateTime utc) {
+  final date = utc.toLocal();
+
+  String two(int value) {
+    return value.toString().padLeft(2, '0');
+  }
+
+  return '${two(date.day)}.'
+      '${two(date.month)}.'
+      '${date.year} '
+      '${two(date.hour)}:${two(date.minute)}';
+}
+
+String _group(int value) {
+  return value.toString().replaceAllMapped(
+    RegExp(r'\B(?=(\d{3})+(?!\d))'),
+    (_) => ' ',
+  );
 }

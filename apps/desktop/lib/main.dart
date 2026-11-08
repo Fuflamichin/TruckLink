@@ -6,16 +6,22 @@ import 'package:design_system/design_system.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:network_protocol/network_protocol.dart';
-import 'package:network_protocol/job_protocol.dart';
+import 'package:network_protocol/finance_protocol.dart';
 import 'package:network_protocol/job_lifecycle_protocol.dart';
-import 'package:telemetry_core/telemetry_core.dart';
+import 'package:network_protocol/job_protocol.dart';
+import 'package:network_protocol/network_protocol.dart';
 import 'package:telemetry_core/job_telemetry.dart';
+import 'package:telemetry_core/telemetry_core.dart';
 
+import 'services/scs_finance_reader.dart';
 import 'services/scs_job_bridge.dart';
 import 'services/scs_job_lifecycle_tracker.dart';
 import 'services/scs_plugin_detector.dart';
 import 'services/scs_telemetry_reader.dart';
+
+// ============================================
+// APPLICATION
+// ============================================
 
 void main() {
   runApp(const ProviderScope(child: DesktopApp()));
@@ -36,7 +42,7 @@ class DesktopApp extends StatelessWidget {
 }
 
 // ============================================
-// CONNECTED DEVICE
+// CONNECTED DEVICE MODEL
 // ============================================
 
 class _ConnectedDevice {
@@ -64,18 +70,23 @@ class _ConnectedDevice {
     );
   }
 
-  String get displayName =>
-      name?.isNotEmpty == true ? name! : 'Устройство $ipAddress';
+  String get displayName {
+    final value = name;
+
+    return value == null || value.isEmpty ? 'Устройство $ipAddress' : value;
+  }
 
   String get connectedTime {
-    final h = connectedAt.hour.toString().padLeft(2, '0');
-    final m = connectedAt.minute.toString().padLeft(2, '0');
-    return '$h:$m';
+    final hours = connectedAt.hour.toString().padLeft(2, '0');
+
+    final minutes = connectedAt.minute.toString().padLeft(2, '0');
+
+    return '$hours:$minutes';
   }
 }
 
 // ============================================
-// WINDOWS HUB
+// DESKTOP HOME
 // ============================================
 
 class DesktopHome extends StatefulWidget {
@@ -86,11 +97,18 @@ class DesktopHome extends StatefulWidget {
 }
 
 class _DesktopHomeState extends State<DesktopHome> {
+  // ==========================================
+  // CONSTANTS
+  // ==========================================
+
   static const int serverPort = 8787;
 
   static const Color _accent = Color(0xFF10EF78);
+
   static const Color _warning = Color(0xFFFFBA63);
+
   static const Color _muted = Color(0xFF9BAAB9);
+
   static const Color _surface = Color(0xFF15232F);
 
   static const Duration _jobSendInterval = Duration(seconds: 1);
@@ -98,51 +116,65 @@ class _DesktopHomeState extends State<DesktopHome> {
   static const Duration _historyCandidateLifetime = Duration(seconds: 30);
 
   // ==========================================
-  // TELEMETRY
+  // SCS SERVICES
   // ==========================================
 
   final ScsTelemetryReader _reader = ScsTelemetryReader();
+
   final ScsJobLifecycleTracker _lifecycle = ScsJobLifecycleTracker();
 
+  final ScsFinanceReader _financeReader = ScsFinanceReader();
+
+  final ScsPluginDetector _pluginDetector = const ScsPluginDetector();
+
   Timer? _telemetryTimer;
+  Timer? _pluginTimer;
+
+  // ==========================================
+  // LIVE TELEMETRY
+  // ==========================================
 
   TruckSnapshot? _snapshot;
+
   TruckLinkJobTelemetry? _activeJob;
 
   int? _lastTimestamp;
+
   DateTime? _lastFrameAt;
 
   bool _telemetryActive = false;
   bool _sharedMemoryAvailable = false;
 
   String? _gameName;
+
   String _gameStatus = 'Ожидание ETS2 / ATS';
 
   // ==========================================
-  // JOB HISTORY CANDIDATE
+  // JOB HISTORY
   // ==========================================
 
-  // The plugin may clear onJob before changing
-  // the delivered/cancelled toggle flag.
-  //
-  // Keep the last observed active job so its
-  // details can be archived on the phone.
   TruckLinkJobTelemetry? _historyCandidate;
+
   DateTime? _historyCandidateSeenAt;
+
+  DateTime? _lastJobBroadcastAt;
+
+  String? _lastJobBroadcastKey;
 
   int _historyEventSequence = 0;
 
-  DateTime? _lastJobBroadcastAt;
-  String? _lastJobBroadcastKey;
-
   // ==========================================
-  // PLUGIN DETECTION
+  // FINANCE HISTORY
   // ==========================================
 
-  final ScsPluginDetector _pluginDetector = const ScsPluginDetector();
+  int _financeEventSequence = 0;
+
+  // ==========================================
+  // PLUGIN STATUS
+  // ==========================================
 
   ScsPluginScanResult? _pluginReport;
-  Timer? _pluginTimer;
+
   bool _pluginChecking = false;
 
   // ==========================================
@@ -157,6 +189,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   bool _stopping = false;
 
   String _serverStatus = 'Сервер остановлен';
+
   String? _localIp;
 
   // ==========================================
@@ -179,7 +212,9 @@ class _DesktopHomeState extends State<DesktopHome> {
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+
       _readTelemetry();
+
       unawaited(_checkPlugin());
       unawaited(_detectLocalIp());
     });
@@ -190,9 +225,10 @@ class _DesktopHomeState extends State<DesktopHome> {
   // ==========================================
 
   String _jobKey(TruckLinkJobTelemetry? job) {
-    if (job == null) return '<no-job>';
+    if (job == null) {
+      return '<no-job>';
+    }
 
-    // GPS and ETA are deliberately omitted.
     return jsonEncode([
       job.gameId,
       job.cargoId,
@@ -206,13 +242,17 @@ class _DesktopHomeState extends State<DesktopHome> {
     ]);
   }
 
+  // ==========================================
+  // CLEAR HISTORY CANDIDATE
+  // ==========================================
+
   void _clearHistoryCandidate() {
     _historyCandidate = null;
     _historyCandidateSeenAt = null;
   }
 
   // ==========================================
-  // CLEAR TELEMETRY
+  // TELEMETRY UNAVAILABLE
   // ==========================================
 
   void _setTelemetryUnavailable(
@@ -232,11 +272,13 @@ class _DesktopHomeState extends State<DesktopHome> {
 
     _snapshot = null;
     _activeJob = null;
+
     _lastTimestamp = null;
     _lastFrameAt = null;
 
     _telemetryActive = false;
     _sharedMemoryAvailable = mappingAvailable;
+
     _gameName = gameName;
     _gameStatus = message;
 
@@ -265,10 +307,12 @@ class _DesktopHomeState extends State<DesktopHome> {
     _snapshot = null;
     _activeJob = null;
 
-    // Keep the last timestamp unchanged so
-    // a frozen frame cannot appear new again.
+    // Keep _lastTimestamp unchanged.
+    // Otherwise a frozen frame may repeatedly
+    // appear to be fresh.
     _telemetryActive = false;
     _sharedMemoryAvailable = true;
+
     _gameName = gameName;
     _gameStatus = 'Нет новых данных от игры';
 
@@ -282,20 +326,77 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // READ TELEMETRY
+  // FINANCE READER
+  // ==========================================
+
+  void _readFinanceEvents() {
+    try {
+      final occurrences = _financeReader.poll();
+
+      for (final occurrence in occurrences) {
+        _broadcastFinanceEvent(occurrence);
+      }
+    } catch (error) {
+      debugPrint('TruckLink finance reader: $error');
+
+      _financeReader.reset();
+    }
+  }
+
+  // ==========================================
+  // FINANCE EVENT BROADCAST
+  // ==========================================
+
+  void _broadcastFinanceEvent(ScsFinanceOccurrence occurrence) {
+    if (_server == null) return;
+
+    final now = DateTime.now().toUtc();
+
+    _financeEventSequence++;
+
+    final event = FinanceEvent(
+      id:
+          'fin-$pid-${now.microsecondsSinceEpoch}'
+          '-$_financeEventSequence',
+      gameId: occurrence.gameId,
+      kind: occurrence.kind,
+      amount: occurrence.signedAmount,
+      occurredAtUtc: now,
+    );
+
+    _sendToAll(encodeFinanceEvent(event));
+
+    debugPrint(
+      'TruckLink finance: '
+      '${event.kind.name} ${event.amount}',
+    );
+  }
+
+  // ==========================================
+  // READ GAME TELEMETRY
   // ==========================================
 
   void _readTelemetry() {
     if (!mounted) return;
 
+    // Financial events are processed separately
+    // because their flags can change without
+    // a new ordinary telemetry timestamp.
+    _readFinanceEvents();
+
     try {
       final frame = _reader.read();
+
+      // ======================================
+      // NO GAME
+      // ======================================
 
       if (frame == null) {
         _lifecycle.reset();
         _clearHistoryCandidate();
 
         _setTelemetryUnavailable('Ожидание запуска игры');
+
         return;
       }
 
@@ -304,6 +405,10 @@ class _DesktopHomeState extends State<DesktopHome> {
         2 => 'American Truck Simulator',
         _ => null,
       };
+
+      // ======================================
+      // SDK INACTIVE
+      // ======================================
 
       if (!frame.sdkActive) {
         _lifecycle.reset();
@@ -314,11 +419,12 @@ class _DesktopHomeState extends State<DesktopHome> {
           gameName: gameName,
           mappingAvailable: true,
         );
+
         return;
       }
 
       // ======================================
-      // OBSERVE LIFECYCLE TOGGLE FLAGS
+      // JOB LIFECYCLE EVENTS
       // ======================================
 
       final event = _lifecycle.observe(
@@ -329,21 +435,18 @@ class _DesktopHomeState extends State<DesktopHome> {
       );
 
       final observedJob = jobTelemetryFromScs(frame);
-      final isTerminalEvent =
+
+      final terminal =
           event == JobLifecycleEventKind.delivered ||
           event == JobLifecycleEventKind.cancelled;
 
-      // For a terminal event, prefer the job
-      // observed in preceding frames. This
-      // avoids archiving a newly accepted job
-      // if two transitions happen close together.
-      if (!isTerminalEvent && observedJob != null) {
+      if (!terminal && observedJob != null) {
         _historyCandidate = observedJob;
         _historyCandidateSeenAt = DateTime.now();
       }
 
       // ======================================
-      // PAUSED GAME
+      // GAME PAUSED
       // ======================================
 
       if (frame.paused) {
@@ -356,8 +459,13 @@ class _DesktopHomeState extends State<DesktopHome> {
         if (event != null) {
           _broadcastJobEvent(event, gameId: frame.gameId);
         }
+
         return;
       }
+
+      // ======================================
+      // NOT LIVE
+      // ======================================
 
       if (!frame.isLive) {
         _setTelemetryUnavailable(
@@ -365,17 +473,23 @@ class _DesktopHomeState extends State<DesktopHome> {
           gameName: gameName,
           mappingAvailable: true,
         );
+
+        if (event != null) {
+          _broadcastJobEvent(event, gameId: frame.gameId);
+        }
+
         return;
       }
 
       final now = DateTime.now();
+
       final hasNewTimestamp = _lastTimestamp != frame.timestamp;
 
-      // ======================================
-      // FROZEN FRAME GUARD
-      // ======================================
-
       final lastFrame = _lastFrameAt;
+
+      // ======================================
+      // FROZEN FRAME
+      // ======================================
 
       if (!hasNewTimestamp &&
           lastFrame != null &&
@@ -385,6 +499,7 @@ class _DesktopHomeState extends State<DesktopHome> {
         if (event != null) {
           _broadcastJobEvent(event, gameId: frame.gameId);
         }
+
         return;
       }
 
@@ -395,15 +510,16 @@ class _DesktopHomeState extends State<DesktopHome> {
       if (hasNewTimestamp) {
         _lastTimestamp = frame.timestamp;
         _lastFrameAt = now;
+
         _snapshot = frame.toTruckSnapshot();
       }
 
       // ======================================
-      // CURRENT JOB
+      // ACTIVE JOB
       // ======================================
 
-      final previousKey = _jobKey(_activeJob);
-      final nextKey = _jobKey(observedJob);
+      final oldJobKey = _jobKey(_activeJob);
+      final newJobKey = _jobKey(observedJob);
 
       _activeJob = observedJob;
 
@@ -415,22 +531,30 @@ class _DesktopHomeState extends State<DesktopHome> {
 
       _telemetryActive = true;
       _sharedMemoryAvailable = true;
+
       _gameName = gameName;
       _gameStatus = 'Телеметрия активна';
+
+      // ======================================
+      // TRUCK BROADCAST
+      // ======================================
 
       if (hasNewTimestamp) {
         _broadcastSnapshot();
       }
 
-      // Change of job: send immediately.
-      // Same job: update GPS once/second.
-      if (hasNewTimestamp || previousKey != nextKey || event != null) {
+      // ======================================
+      // JOB BROADCAST
+      // ======================================
+
+      if (hasNewTimestamp || oldJobKey != newJobKey || event != null) {
         _broadcastJob(observedJob);
       }
 
-      // Send the terminal event after the
-      // state update so Android can clear
-      // the old cargo and save history.
+      // ======================================
+      // LIFECYCLE BROADCAST
+      // ======================================
+
       if (event != null) {
         _broadcastJobEvent(event, gameId: frame.gameId);
       }
@@ -447,19 +571,21 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // BROADCAST SNAPSHOT
+  // BROADCAST TRUCK SNAPSHOT
   // ==========================================
 
   void _broadcastSnapshot() {
     final snapshot = _snapshot;
 
-    if (_server == null || snapshot == null) return;
+    if (_server == null || snapshot == null) {
+      return;
+    }
 
     _sendToAll(encodeSnapshot(snapshot));
   }
 
   // ==========================================
-  // BROADCAST JOB
+  // BROADCAST CURRENT JOB
   // ==========================================
 
   void _broadcastJob(TruckLinkJobTelemetry? job) {
@@ -468,13 +594,14 @@ class _DesktopHomeState extends State<DesktopHome> {
     final key = _jobKey(job);
     final now = DateTime.now();
 
-    final differentJob = key != _lastJobBroadcastKey;
-    final lastSent = _lastJobBroadcastAt;
+    final changed = key != _lastJobBroadcastKey;
+
+    final previous = _lastJobBroadcastAt;
 
     final intervalElapsed =
-        lastSent == null || now.difference(lastSent) >= _jobSendInterval;
+        previous == null || now.difference(previous) >= _jobSendInterval;
 
-    if (!differentJob && (job == null || !intervalElapsed)) {
+    if (!changed && (job == null || !intervalElapsed)) {
       return;
     }
 
@@ -485,11 +612,11 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // BROADCAST LIFECYCLE AND HISTORY
+  // JOB RESULT AND HISTORY
   // ==========================================
 
   void _broadcastJobEvent(JobLifecycleEventKind event, {required int gameId}) {
-    final isTerminal =
+    final terminal =
         event == JobLifecycleEventKind.delivered ||
         event == JobLifecycleEventKind.cancelled;
 
@@ -498,7 +625,7 @@ class _DesktopHomeState extends State<DesktopHome> {
     TruckLinkJobTelemetry? completedJob;
     String? eventId;
 
-    if (isTerminal) {
+    if (terminal) {
       final candidate = _historyCandidate;
       final seenAt = _historyCandidateSeenAt;
 
@@ -510,13 +637,11 @@ class _DesktopHomeState extends State<DesktopHome> {
         }
       }
 
-      // Only confirmed terminal events
-      // with genuine job data are archived.
       if (completedJob != null) {
         _historyEventSequence++;
 
         eventId =
-            '$pid-${now.microsecondsSinceEpoch}'
+            'job-$pid-${now.microsecondsSinceEpoch}'
             '-$_historyEventSequence';
       }
     }
@@ -530,35 +655,33 @@ class _DesktopHomeState extends State<DesktopHome> {
       ),
     );
 
-    debugPrint(
-      'TruckLink: job event ${event.name}'
-      '${eventId == null ? "" : " ($eventId)"}',
-    );
+    debugPrint('TruckLink job event: ${event.name}');
 
-    if (isTerminal) {
+    if (terminal) {
       _clearHistoryCandidate();
     }
   }
 
   // ==========================================
-  // SEND TO CONNECTED DEVICES
+  // SEND TO ALL PHONES
   // ==========================================
 
-  void _sendToAll(String textMessage) {
+  void _sendToAll(String message) {
     if (_server == null) return;
 
     for (final socket in _clients.keys.toList()) {
       try {
-        socket.add(textMessage);
+        socket.add(message);
       } catch (error) {
-        debugPrint('TruckLink send error: $error');
+        debugPrint('TruckLink WebSocket send: $error');
+
         _removeClient(socket);
       }
     }
   }
 
   // ==========================================
-  // PLUGIN DETECTOR
+  // PLUGIN DETECTION
   // ==========================================
 
   Future<void> _checkPlugin() async {
@@ -569,12 +692,12 @@ class _DesktopHomeState extends State<DesktopHome> {
     });
 
     try {
-      final report = await _pluginDetector.scan();
+      final result = await _pluginDetector.scan();
 
       if (!mounted) return;
 
       setState(() {
-        _pluginReport = report;
+        _pluginReport = result;
       });
     } catch (error) {
       debugPrint('TruckLink plugin scan: $error');
@@ -594,7 +717,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // LOCAL IP ADDRESS
+  // DETECT LOCAL IP
   // ==========================================
 
   Future<void> _detectLocalIp() async {
@@ -627,34 +750,34 @@ class _DesktopHomeState extends State<DesktopHome> {
 
       final privateAddresses = addresses.where(isPrivate).toList();
 
-      final selected = privateAddresses.isNotEmpty
+      final ip = privateAddresses.isNotEmpty
           ? privateAddresses.first
-          : addresses.isNotEmpty
-          ? addresses.first
-          : null;
+          : addresses.isEmpty
+          ? null
+          : addresses.first;
 
-      if (!mounted) return;
-
-      setState(() {
-        _localIp = selected;
-      });
+      if (mounted) {
+        setState(() {
+          _localIp = ip;
+        });
+      }
     } catch (error) {
       debugPrint('TruckLink IP detection: $error');
     }
   }
 
   String get _serverAddress {
-    final address = _localIp;
+    final ip = _localIp;
 
-    if (address == null) {
+    if (ip == null) {
       return 'IP компьютера · порт $serverPort';
     }
 
-    return 'ws://$address:$serverPort';
+    return 'ws://$ip:$serverPort';
   }
 
   // ==========================================
-  // START SERVER
+  // START WEBSOCKET SERVER
   // ==========================================
 
   Future<void> _startServer() async {
@@ -676,6 +799,7 @@ class _DesktopHomeState extends State<DesktopHome> {
       }
 
       _server = server;
+
       _lastJobBroadcastAt = null;
       _lastJobBroadcastKey = null;
 
@@ -708,8 +832,8 @@ class _DesktopHomeState extends State<DesktopHome> {
               connectedAt: DateTime.now(),
             );
 
-            // Send current data to new clients.
-            // Old terminal events are not replayed.
+            // Immediately send current state.
+            // Historical events are not replayed.
             final snapshot = _snapshot;
 
             if (snapshot != null) {
@@ -722,16 +846,23 @@ class _DesktopHomeState extends State<DesktopHome> {
               (message) {
                 _handleClientMessage(socket, message);
               },
-              onDone: () => _removeClient(socket),
+              onDone: () {
+                _removeClient(socket);
+              },
               onError: (Object error) {
                 _removeClient(socket);
               },
               cancelOnError: true,
             );
 
-            if (mounted) setState(() {});
+            if (mounted) {
+              setState(() {});
+            }
           } catch (error) {
-            debugPrint('TruckLink WebSocket handshake: $error');
+            debugPrint(
+              'TruckLink WebSocket handshake: '
+              '$error',
+            );
           }
         },
         onError: (Object error) {
@@ -766,7 +897,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // DEVICE IDENTIFICATION
+  // CLIENT HELLO
   // ==========================================
 
   void _handleClientMessage(WebSocket socket, dynamic message) {
@@ -775,21 +906,21 @@ class _DesktopHomeState extends State<DesktopHome> {
     }
 
     try {
-      final decoded = jsonDecode(message);
+      final data = jsonDecode(message);
 
-      if (decoded is! Map<String, dynamic> ||
-          decoded['type'] != 'client_hello') {
+      if (data is! Map<String, dynamic> || data['type'] != 'client_hello') {
         return;
       }
 
-      final rawName = decoded['name'];
-      final rawPlatform = decoded['platform'];
+      final rawName = data['name'];
 
       if (rawName is! String) return;
 
       final name = _cleanLabel(rawName, 64);
 
       if (name.isEmpty) return;
+
+      final rawPlatform = data['platform'];
 
       final platform = rawPlatform is String
           ? _cleanLabel(rawPlatform, 20)
@@ -805,22 +936,30 @@ class _DesktopHomeState extends State<DesktopHome> {
 
       _clients[socket] = previous.identified(name: name, platform: platform);
 
-      if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {});
+      }
     } on FormatException {
-      // Ignore invalid client messages.
+      // Ignore malformed identification data.
     } catch (error) {
-      debugPrint('TruckLink client hello: $error');
+      debugPrint('TruckLink client identification: $error');
     }
   }
 
-  String _cleanLabel(String value, int length) {
+  String _cleanLabel(String value, int maxLength) {
     final cleaned = value
         .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
 
-    return cleaned.length <= length ? cleaned : cleaned.substring(0, length);
+    return cleaned.length <= maxLength
+        ? cleaned
+        : cleaned.substring(0, maxLength);
   }
+
+  // ==========================================
+  // REMOVE DEVICE
+  // ==========================================
 
   void _removeClient(WebSocket socket) {
     final removed = _clients.remove(socket) != null;
@@ -837,7 +976,9 @@ class _DesktopHomeState extends State<DesktopHome> {
   Future<void> _stopServer() async {
     final server = _server;
 
-    if (server == null || _stopping) return;
+    if (server == null || _stopping) {
+      return;
+    }
 
     setState(() {
       _stopping = true;
@@ -851,7 +992,7 @@ class _DesktopHomeState extends State<DesktopHome> {
         try {
           await socket.close().timeout(const Duration(seconds: 2));
         } catch (_) {
-          // Already disconnected.
+          // The socket may already be closed.
         }
       }
 
@@ -874,7 +1015,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // PLUGIN DOWNLOAD
+  // OPEN PLUGIN DOWNLOAD PAGE
   // ==========================================
 
   Future<void> _openPluginDownload() async {
@@ -893,8 +1034,14 @@ class _DesktopHomeState extends State<DesktopHome> {
     }
   }
 
+  // ==========================================
+  // PLUGIN STATUS
+  // ==========================================
+
   String get _pluginStatus {
-    if (_telemetryActive) return 'Работает';
+    if (_telemetryActive) {
+      return 'Работает';
+    }
 
     if (_sharedMemoryAvailable) {
       return 'Обнаружен в памяти';
@@ -934,14 +1081,15 @@ class _DesktopHomeState extends State<DesktopHome> {
 
     return report.games
         .map((game) {
-          return '${game.name}: '
-              '${game.pluginInstalled ? "найден" : "отсутствует"}';
+          final status = game.pluginInstalled ? 'найден' : 'отсутствует';
+
+          return '${game.name}: $status';
         })
         .join(' · ');
   }
 
   // ==========================================
-  // UI
+  // CARD HELPERS
   // ==========================================
 
   Widget _card(Widget child) {
@@ -968,6 +1116,10 @@ class _DesktopHomeState extends State<DesktopHome> {
       child: Icon(icon, color: color, size: 20),
     );
   }
+
+  // ==========================================
+  // GAME CARD
+  // ==========================================
 
   Widget _buildGameCard() {
     return _card(
@@ -1009,10 +1161,14 @@ class _DesktopHomeState extends State<DesktopHome> {
     );
   }
 
+  // ==========================================
+  // PLUGIN CARD
+  // ==========================================
+
   Widget _buildPluginCard() {
     final report = _pluginReport;
 
-    final pluginReady =
+    final ready =
         _telemetryActive ||
         _sharedMemoryAvailable ||
         report?.allInstalled == true;
@@ -1028,10 +1184,7 @@ class _DesktopHomeState extends State<DesktopHome> {
         children: [
           Row(
             children: [
-              _statusIcon(
-                Icons.extension_outlined,
-                pluginReady ? _accent : _warning,
-              ),
+              _statusIcon(Icons.extension_outlined, ready ? _accent : _warning),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -1066,14 +1219,15 @@ class _DesktopHomeState extends State<DesktopHome> {
                     : () => unawaited(_checkPlugin()),
                 icon: _pluginChecking
                     ? const SizedBox(
-                        width: 18,
                         height: 18,
+                        width: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.refresh_rounded, size: 19),
               ),
             ],
           ),
+
           if (offerDownload) ...[
             const SizedBox(height: 10),
             OutlinedButton.icon(
@@ -1086,6 +1240,10 @@ class _DesktopHomeState extends State<DesktopHome> {
       ),
     );
   }
+
+  // ==========================================
+  // SERVER CARD
+  // ==========================================
 
   Widget _buildServerCard() {
     final running = _server != null;
@@ -1130,6 +1288,7 @@ class _DesktopHomeState extends State<DesktopHome> {
             ],
           ),
           const SizedBox(height: 10),
+
           Row(
             children: [
               Expanded(
@@ -1151,7 +1310,9 @@ class _DesktopHomeState extends State<DesktopHome> {
               ),
             ],
           ),
+
           const SizedBox(height: 6),
+
           SizedBox(
             width: double.infinity,
             child: FilledButton.icon(
@@ -1176,6 +1337,10 @@ class _DesktopHomeState extends State<DesktopHome> {
       ),
     );
   }
+
+  // ==========================================
+  // CONNECTED DEVICES CARD
+  // ==========================================
 
   Widget _buildDevicesCard() {
     final devices = _clients.values.toList()
@@ -1205,6 +1370,7 @@ class _DesktopHomeState extends State<DesktopHome> {
               ),
             ],
           ),
+
           if (devices.isEmpty)
             const Padding(
               padding: EdgeInsets.only(top: 10),
@@ -1214,54 +1380,75 @@ class _DesktopHomeState extends State<DesktopHome> {
               ),
             )
           else
-            for (final device in devices)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 7),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.smartphone_outlined,
-                      color: _accent,
-                      size: 21,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            device.displayName,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13,
-                            ),
-                          ),
-                          const SizedBox(height: 3),
-                          Text(
-                            [
-                              if (device.platform != null &&
-                                  device.platform!.isNotEmpty)
-                                device.platform!,
-                              device.ipAddress,
-                              'с ${device.connectedTime}',
-                            ].join(' · '),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(color: _muted, fontSize: 11),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Icon(Icons.circle, color: _accent, size: 8),
-                  ],
-                ),
-              ),
+            for (final device in devices) _deviceRow(device),
         ],
       ),
     );
   }
+
+  // ==========================================
+  // CONNECTED DEVICE ROW
+  // ==========================================
+
+  Widget _deviceRow(_ConnectedDevice device) {
+    // Build the subtitle separately to keep
+    // the widget tree simple and valid.
+    final subtitleParts = <String>[];
+
+    final platform = device.platform;
+
+    if (platform != null && platform.isNotEmpty) {
+      subtitleParts.add(platform);
+    }
+
+    subtitleParts.add(device.ipAddress);
+    subtitleParts.add('с ${device.connectedTime}');
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        children: [
+          const Icon(Icons.smartphone_outlined, color: _accent, size: 21),
+
+          const SizedBox(width: 10),
+
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  device.displayName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+
+                const SizedBox(height: 3),
+
+                Text(
+                  subtitleParts.join(' · '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: _muted, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(width: 8),
+
+          const Icon(Icons.circle, color: _accent, size: 8),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================
+  // BUILD HUB
+  // ==========================================
 
   @override
   Widget build(BuildContext context) {
@@ -1288,20 +1475,33 @@ class _DesktopHomeState extends State<DesktopHome> {
                   ),
                 ],
               ),
+
               const SizedBox(height: 5),
+
               const Text(
-                'Связь между ETS2 / ATS и телефоном',
+                'Связь между ETS2 / ATS '
+                'и телефоном',
                 style: TextStyle(color: _muted, fontSize: 12),
               ),
+
               const SizedBox(height: 17),
+
               _buildGameCard(),
+
               const SizedBox(height: 10),
+
               _buildPluginCard(),
+
               const SizedBox(height: 10),
+
               _buildServerCard(),
+
               const SizedBox(height: 10),
+
               _buildDevicesCard(),
+
               const SizedBox(height: 12),
+
               const Text(
                 'Используй только доверенную '
                 'локальную сеть.',
@@ -1316,7 +1516,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   }
 
   // ==========================================
-  // CLEANUP
+  // DISPOSE
   // ==========================================
 
   @override
